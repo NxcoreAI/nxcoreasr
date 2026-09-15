@@ -266,6 +266,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
                         "status": task.status, "queued": False}
             seq = db.scalar(select(func.coalesce(func.max(Task.seq), 0) + 1)
                             .where(Task.session_id == task.session_id))
+            task.seq = seq
             task.status = "queued"
             task.upload_token = None
             task.upload_expires_at = None
@@ -307,6 +308,20 @@ def create_app(config_path: str | None = None) -> FastAPI:
                                   .order_by(Utterance.seq)).all()
                 body["utterances"] = _utterances_payload(db, task.session_id, rows)
         return body
+
+    @app.get("/v1/sessions/{sid}/tasks")
+    def list_tasks(sid: str, request: Request, limit: int = 50,
+                   tenant: str = Depends(require_tenant)):
+        _get_session(request.app.state.db_engine, tenant, sid)
+        limit = max(1, min(limit, 200))
+        with tenant_session(request.app.state.db_engine, tenant) as db:
+            rows = db.scalars(select(Task).where(Task.session_id == sid)
+                              .order_by(Task.seq.desc()).limit(limit)).all()
+        return {"session_id": sid, "tasks": [{
+            "task_id": t.id, "seq": t.seq, "status": t.status, "error": t.error,
+            "duration_ms": t.duration_ms, "created_at": t.created_at,
+            "done_at": t.done_at, "idem_key": t.idem_key,
+        } for t in rows]}
 
     @app.get("/v1/asr-jobs/{jid}")
     def get_job(jid: str, request: Request, tenant: str = Depends(require_tenant)):

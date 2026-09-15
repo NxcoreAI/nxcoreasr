@@ -5,46 +5,67 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nxcore-asr 测试台</title>
 <style>
-  :root { --line:#e2e2e2; --muted:#777; --accent:#1a56db; }
+  :root { --line:#e2e2e2; --muted:#777; --accent:#1a56db; --ok:#067647; --bad:#b42318; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; color:#1b1b1b; background:#fafafa; }
   header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:12px 20px; background:#fff; border-bottom:1px solid var(--line); }
   header .title { font-weight:600; margin-right:8px; }
-  input, select, button { font:inherit; padding:5px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  input, select, button, textarea { font:inherit; padding:5px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
   button { cursor:pointer; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button.danger { color:#b42318; }
-  button.rec-on { background:#b42318; border-color:#b42318; color:#fff; }
-  main { display:grid; grid-template-columns:1fr 320px; gap:16px; padding:16px 20px; max-width:1100px; }
-  section, aside > div { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:16px; }
+  button.danger { color:var(--bad); }
+  button.rec-on { background:var(--bad); border-color:var(--bad); color:#fff; }
+  main { display:grid; grid-template-columns:1fr 340px; gap:16px; padding:16px 20px; max-width:1180px; }
+  section, aside > div, .netsec { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:16px; }
+  .netsec { grid-column:1 / -1; }
   h2 { font-size:14px; margin:0 0 10px; display:flex; align-items:center; gap:8px; }
   .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   .muted { color:var(--muted); font-size:12px; }
+  .meta { color:var(--muted); font-size:12px; margin-top:8px; }
+  .badge { display:inline-block; padding:0 8px; border-radius:10px; font-size:12px; line-height:18px; white-space:nowrap; }
+  .st-pending_upload, .st-uploaded, .st-queued { background:#f2f4f7; color:#667085; }
+  .st-processing { background:#eef4ff; color:var(--accent); }
+  .st-done { background:#ecfdf3; color:var(--ok); }
+  .st-failed { background:#fef3f2; color:var(--bad); }
   .utt { padding:6px 0; border-bottom:1px solid #f0f0f0; }
   .utt:last-child { border-bottom:none; }
   .utt .who { font-weight:600; margin-right:8px; }
   .utt .t { color:var(--muted); font-size:12px; margin-left:8px; }
-  .spk { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #f0f0f0; }
+  .spk { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 0; border-bottom:1px solid #f0f0f0; }
   .spk:last-child { border-bottom:none; }
   .spk .nm { font-weight:600; }
+  .task { padding:6px 0; border-bottom:1px solid #f0f0f0; }
+  .task:last-child { border-bottom:none; }
+  .task .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .task pre, #reqOut { background:#fafafa; border:1px solid var(--line); border-radius:6px; padding:8px; font-size:12px; overflow:auto; max-height:280px; margin:6px 0 0; white-space:pre-wrap; word-break:break-all; }
+  #netlog { max-height:220px; overflow:auto; }
+  #netlog div { padding:1px 0; }
+  #netlog .bad { color:var(--bad); }
   #taskStatus { font-size:13px; }
-  #err { color:#b42318; font-size:13px; padding:0 20px; }
+  #err { color:var(--bad); font-size:13px; padding:0 20px; }
 </style>
 </head>
 <body>
 <header>
   <span class="title">nxcore-asr 测试台</span>
   <input id="key" placeholder="API Key" size="22">
-  <select id="sessions"></select>
-  <input id="extid" placeholder="external_id" size="12">
-  <button id="btnReg">注册会话</button>
-  <button id="btnDel" class="danger">删除会话</button>
   <span id="health" class="muted"></span>
 </header>
 <div id="err"></div>
 <main>
   <div>
     <section>
+      <h2>会话</h2>
+      <div class="bar">
+        <select id="sessions"></select>
+        <input id="extid" placeholder="external_id" size="12">
+        <button id="btnReg">注册会话</button>
+        <button id="btnDel" class="danger">删除会话</button>
+      </div>
+      <div id="sesMeta" class="meta"></div>
+    </section>
+    <section>
+      <h2>录音与上传</h2>
       <div class="bar">
         <button id="btnRec" class="primary">开始录音</button>
         <input type="file" id="file" accept="audio/*">
@@ -53,8 +74,13 @@
       </div>
     </section>
     <section>
+      <h2>任务 <button id="btnTasks">刷新</button></h2>
+      <div id="tasks" class="muted">—</div>
+    </section>
+    <section>
       <h2>转写结果 <button id="btnRefresh">刷新</button> <span id="ver" class="muted"></span></h2>
       <div id="results" class="muted">—</div>
+      <div class="bar" style="margin-top:8px"><button id="btnMore" hidden>加载更多</button></div>
     </section>
   </div>
   <aside>
@@ -68,7 +94,25 @@
         <button id="btnMerge">合并</button>
       </div>
     </div>
+    <div>
+      <h2>通用请求</h2>
+      <div class="bar">
+        <select id="reqMethod">
+          <option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option>
+        </select>
+        <input id="reqPath" placeholder="/v1/…" size="20" value="/v1/health">
+      </div>
+      <textarea id="reqBody" rows="3" placeholder='{"external_id": "x"}' style="width:100%;margin-top:8px"></textarea>
+      <div class="bar" style="margin-top:8px"><button id="btnReq" class="primary">发送</button></div>
+      <pre id="reqOut" hidden></pre>
+    </div>
   </aside>
+  <div class="netsec">
+    <details>
+      <summary>请求记录</summary>
+      <div id="netlog" class="muted" style="margin-top:8px"></div>
+    </details>
+  </div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -77,9 +121,39 @@ const err = m => { $("err").textContent = m || ""; };
 $("key").value = localStorage.getItem("asr_key") || "";
 $("key").addEventListener("change", () => localStorage.setItem("asr_key", $("key").value.trim()));
 
-async function api(path, opts = {}) {
+const calls = [];
+function logCall(method, path, status, ms) {
+  calls.unshift({ method, path, status, ms, t: new Date() });
+  if (calls.length > 50) calls.pop();
+  const box = $("netlog");
+  box.innerHTML = "";
+  for (const c of calls) {
+    const d = document.createElement("div");
+    const tm = document.createElement("span");
+    tm.textContent = c.t.toLocaleTimeString() + " ";
+    const m = document.createElement("b");
+    m.textContent = c.method + " ";
+    const p = document.createElement("span");
+    p.textContent = c.path + " → ";
+    const s = document.createElement("span");
+    s.textContent = `${c.status} ${c.ms}ms`;
+    if (c.status >= 400) s.className = "bad";
+    d.append(tm, m, p, s);
+    box.appendChild(d);
+  }
+}
+
+async function http(url, opts = {}) {
   opts.headers = Object.assign({ "Authorization": "Bearer " + $("key").value.trim() }, opts.headers || {});
-  const r = await fetch("/v1" + path, opts);
+  const t0 = performance.now();
+  const r = await fetch(url, opts);
+  logCall(opts.method || "GET", url.replace(location.origin, ""), r.status,
+          Math.round(performance.now() - t0));
+  return r;
+}
+
+async function api(path, opts = {}) {
+  const r = await http("/v1" + path, opts);
   if (!r.ok) {
     let d = ""; try { d = (await r.json()).detail; } catch {}
     throw new Error(`${r.status} ${d || r.statusText}`);
@@ -91,7 +165,23 @@ const jpost = (path, body, method = "POST") => api(path, {
 });
 
 const sid = () => $("sessions").value;
-const extById = {};
+const extById = {}, metaById = {};
+
+async function loadHealth() {
+  try {
+    const h = await api("/health");
+    const avg = h.avg_duration_ms != null ? (h.avg_duration_ms / 1000).toFixed(1) + "s" : "—";
+    $("health").textContent =
+      `引擎 ${h.engine} · 队列 ${h.queue.queued}/${h.queue.workers} · 完成 ${h.done} · 失败 ${h.failed} · 均耗 ${avg}`;
+  } catch { $("health").textContent = ""; }
+}
+
+function renderSesMeta() {
+  const m = metaById[sid()];
+  $("sesMeta").textContent = m
+    ? `v${m.version} · ${m.audio_count} 段 · ${m.done_count} 成功 · ${m.failed_count} 失败 · ${m.speaker_count} 说话人 · ${m.created_at || ""}`
+    : "";
+}
 
 async function loadSessions(selectId) {
   const d = await api("/sessions");
@@ -99,26 +189,24 @@ async function loadSessions(selectId) {
   sel.innerHTML = "";
   for (const s of d.sessions) {
     extById[s.session_id] = s.external_id;
+    metaById[s.session_id] = s;
     const o = document.createElement("option");
     o.value = s.session_id;
     o.textContent = `${s.external_id}（${s.done_count}/${s.audio_count}）`;
     sel.appendChild(o);
   }
   if (selectId) sel.value = selectId;
-  await refresh();
+  renderSesMeta();
+  await Promise.all([refresh(), loadTasks()]);
 }
 
-async function refresh() {
-  if (!sid()) { $("results").textContent = "—"; $("speakers").textContent = "—"; $("ver").textContent = ""; return; }
-  const [res, spk] = await Promise.all([
-    api(`/sessions/${sid()}/results`),
-    api(`/sessions/${sid()}/speakers`),
-  ]);
+let resAfter = 0, resMore = false;
+async function loadResults(reset) {
+  const res = await api(`/sessions/${sid()}/results?after=${resAfter}`);
   $("ver").textContent = "v" + res.session_version;
   const box = $("results");
-  box.classList.toggle("muted", !res.utterances.length);
-  box.innerHTML = "";
-  if (!res.utterances.length) box.textContent = "—";
+  if (reset) box.innerHTML = "";
+  if (reset && !res.utterances.length) box.textContent = "—";
   for (const u of res.utterances) {
     const div = document.createElement("div");
     div.className = "utt";
@@ -128,6 +216,14 @@ async function refresh() {
     div.querySelector(".tx").textContent = u.text;
     box.appendChild(div);
   }
+  box.classList.toggle("muted", reset && !res.utterances.length);
+  resAfter = res.next_cursor;
+  resMore = res.utterances.length >= 500;
+  $("btnMore").hidden = !resMore;
+}
+
+async function loadSpeakers() {
+  const spk = await api(`/sessions/${sid()}/speakers`);
   const sb = $("speakers");
   sb.classList.toggle("muted", !spk.speakers.length);
   sb.innerHTML = "";
@@ -149,7 +245,7 @@ async function refresh() {
     const setName = async (name) => {
       try {
         await jpost(`/sessions/${sid()}/speakers/${s.person_id}/name`, { name }, "PUT");
-        await refresh();
+        await loadSpeakers();
       } catch (e) { err(e.message); }
     };
     const btnName = document.createElement("button");
@@ -166,7 +262,7 @@ async function refresh() {
       ok.onclick = () => setName(inp.value.trim() || null);
       const cancel = document.createElement("button");
       cancel.textContent = "取消";
-      cancel.onclick = () => refresh().catch(e => err(e.message));
+      cancel.onclick = () => loadSpeakers().catch(e => err(e.message));
       inp.addEventListener("keydown", e => {
         if (e.key === "Enter") ok.onclick();
         if (e.key === "Escape") cancel.onclick();
@@ -185,7 +281,7 @@ async function refresh() {
       const b = document.createElement("button");
       b.textContent = "撤销合并";
       b.onclick = async () => {
-        try { await jpost(`/sessions/${sid()}/speakers/${child}/unmerge`, {}); await refresh(); }
+        try { await jpost(`/sessions/${sid()}/speakers/${child}/unmerge`, {}); await loadSpeakers(); }
         catch (e) { err(e.message); }
       };
       row.appendChild(b);
@@ -200,6 +296,77 @@ async function refresh() {
   }
 }
 
+async function loadTasks() {
+  if (!sid()) { $("tasks").textContent = "—"; return; }
+  const d = await api(`/sessions/${sid()}/tasks`);
+  const box = $("tasks");
+  box.innerHTML = "";
+  box.classList.toggle("muted", !d.tasks.length);
+  if (!d.tasks.length) box.textContent = "—";
+  for (const t of d.tasks) {
+    const row = document.createElement("div");
+    row.className = "task";
+    const bar = document.createElement("div");
+    bar.className = "row";
+    const seq = document.createElement("span");
+    seq.textContent = t.seq == null ? "未编号" : "#" + t.seq;
+    const badge = document.createElement("span");
+    badge.className = "badge st-" + t.status;
+    badge.textContent = t.status;
+    const info = document.createElement("span");
+    info.className = "muted";
+    info.textContent = [
+      t.duration_ms != null ? (t.duration_ms / 1000).toFixed(1) + "s" : null,
+      (t.done_at || t.created_at || "").slice(11, 19),
+    ].filter(Boolean).join(" · ");
+    bar.append(seq, badge, info);
+
+    const btnDetail = document.createElement("button");
+    btnDetail.textContent = "详情";
+    let open = false, pre = null;
+    btnDetail.onclick = async () => {
+      open = !open;
+      btnDetail.textContent = open ? "收起" : "详情";
+      if (open && !pre) {
+        pre = document.createElement("pre");
+        pre.textContent = "加载中…";
+        row.appendChild(pre);
+        try { pre.textContent = JSON.stringify(await api(`/asr-jobs/${t.task_id}`), null, 2); }
+        catch (e) { pre.textContent = e.message; }
+      }
+      if (pre) pre.style.display = open ? "" : "none";
+    };
+    bar.appendChild(btnDetail);
+
+    if (t.status === "failed") {
+      const btnRetry = document.createElement("button");
+      btnRetry.textContent = "重试";
+      btnRetry.onclick = async () => {
+        err("");
+        try { await jpost(`/tasks/${t.task_id}/retry`, {}); await loadTasks(); }
+        catch (e) { err(e.message); }
+      };
+      bar.appendChild(btnRetry);
+      const em = document.createElement("span");
+      em.className = "muted";
+      em.textContent = (t.error || "").slice(0, 80);
+      bar.appendChild(em);
+    }
+    row.appendChild(bar);
+    box.appendChild(row);
+  }
+}
+
+async function refresh() {
+  if (!sid()) {
+    $("results").textContent = "—"; $("speakers").textContent = "—";
+    $("ver").textContent = ""; $("btnMore").hidden = true;
+    return;
+  }
+  resAfter = 0;
+  await Promise.all([loadResults(true), loadSpeakers()]);
+}
+
 $("btnReg").onclick = async () => {
   err("");
   const ext = $("extid").value.trim();
@@ -210,12 +377,43 @@ $("btnReg").onclick = async () => {
 
 $("btnDel").onclick = async () => {
   if (!sid() || !confirm("删除该会话？结果与说话人库将全部清除，不可恢复。")) return;
-  try { await api(`/sessions/${sid()}`, { method: "DELETE" }); await loadSessions(); }
+  try { await api(`/sessions/${sid()}`, { method: "DELETE" }); await loadSessions(); loadHealth(); }
   catch (e) { err(e.message); }
 };
 
-$("sessions").onchange = refresh;
 $("btnRefresh").onclick = () => refresh().catch(e => err(e.message));
+$("btnTasks").onclick = () => loadTasks().catch(e => err(e.message));
+$("btnMore").onclick = () => loadResults(false).catch(e => err(e.message));
+$("btnMerge").onclick = async () => {
+  err("");
+  const from = $("mFrom").value, into = $("mInto").value;
+  if (!from || !into) return err("请先选择说话人");
+  try { await jpost(`/sessions/${sid()}/speakers/merge`, { from_person: from, into_person: into }); await loadSpeakers(); }
+  catch (e) { err(e.message); }
+};
+
+$("btnReq").onclick = async () => {
+  err("");
+  const method = $("reqMethod").value;
+  const path = $("reqPath").value.trim();
+  if (!path) return err("请填接口路径");
+  const opts = { method, headers: {} };
+  const body = $("reqBody").value.trim();
+  if (body && method !== "GET" && method !== "DELETE") {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = body;
+  }
+  const out = $("reqOut");
+  out.hidden = false;
+  out.textContent = "请求中…";
+  try {
+    const r = await http(path, opts);
+    const text = await r.text();
+    let s = `${r.status} ${r.statusText || ""}`;
+    try { s += "\n" + JSON.stringify(JSON.parse(text), null, 2); } catch { s += "\n" + text; }
+    out.textContent = s;
+  } catch (e) { out.textContent = "请求失败：" + e.message; }
+};
 
 async function uploadBlob(blob, targetSid) {
   const s = targetSid || sid();
@@ -226,12 +424,9 @@ async function uploadBlob(blob, targetSid) {
   const job = await jpost("/asr-jobs", { external_id: ext });
   if (job.status === "pending_upload" || job.status === "uploaded") {
     const authz = await jpost(`/asr-jobs/${job.job_id}/upload-authorization`, {});
-    const r = await fetch(authz.upload_url, {
+    const r = await http(authz.upload_url, {
       method: "PUT",
-      headers: {
-        "Authorization": "Bearer " + $("key").value.trim(),
-        "Content-Type": "application/octet-stream",
-      },
+      headers: { "Content-Type": "application/octet-stream" },
       body: blob,
     });
     if (!r.ok) throw new Error(`直传失败 ${r.status}`);
@@ -242,9 +437,10 @@ async function uploadBlob(blob, targetSid) {
     const t = await api(`/tasks/${job.job_id}`);
     if (t.status === "done") {
       $("taskStatus").textContent = `完成，耗时 ${(t.duration_ms/1000).toFixed(1)}s`;
-      await refresh(); await loadSessions(sid());
+      await refresh(); await loadTasks(); await loadSessions(sid()); loadHealth();
     } else if (t.status === "failed") {
       $("taskStatus").textContent = "失败：" + t.error;
+      await loadTasks();
     } else {
       $("taskStatus").textContent = t.status === "processing" ? "转写中…" : "排队中…";
       setTimeout(() => poll().catch(e => err(e.message)), 1500);
@@ -260,7 +456,7 @@ $("btnUpload").onclick = () => {
 };
 
 // 每段独立起一个完整录制再停：webm 分片只有首片带文件头，后端解不开，必须整文件切换
-let recorder = null, stream = null, segTimer = null, chunks = [], recSid = null;
+let recorder = null, stream = null, segTimer = null, chunks = [], recSid = null, recN = 0;
 
 function startSegment() {
   chunks = [];
@@ -268,7 +464,11 @@ function startSegment() {
   recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
   recorder.onstop = () => {
     const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-    if (blob.size) uploadBlob(blob, recSid).catch(e => err(e.message));
+    if (blob.size) {
+      recN += 1;
+      $("taskStatus").textContent = `上传第 ${recN} 段…`;
+      uploadBlob(blob, recSid).catch(e => err(e.message));
+    }
     if (stream) startSegment();
     else {
       recorder = null;
@@ -295,6 +495,7 @@ $("btnRec").onclick = async () => {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) { return err("无法访问麦克风：" + e.message); }
   // 录音目标已锁定：期间禁用会话切换/注册/删除，避免看着别的会话以为没结果
+  recN = 0;
   for (const id of ["sessions", "btnReg", "btnDel"]) $(id).disabled = true;
   startSegment();
   segTimer = setInterval(() => {
@@ -305,10 +506,7 @@ $("btnRec").onclick = async () => {
 };
 
 (async () => {
-  try {
-    const h = await api("/health");
-    $("health").textContent = `引擎 ${h.engine} · 队列 ${h.queue.queued}`;
-  } catch {}
+  await loadHealth();
   if ($("key").value) loadSessions().catch(e => err(e.message));
 })();
 </script>

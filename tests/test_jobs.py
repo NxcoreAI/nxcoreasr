@@ -123,3 +123,19 @@ def test_job_requires_key(client):
     a = _authorize(client, job)
     assert client.put(urlparse(a["upload_url"]).path, content=make_wav()).status_code == 401
     assert client.post(f"/v1/asr-jobs/{job}/upload-complete").status_code == 401
+
+
+def test_list_tasks(client):
+    sid = register(client, "list-1")
+    done = upload(client, sid)
+    wait_done(client, done)
+    pending = create_job(client, "list-1")["job_id"]  # 只建单不传，停在 pending_upload
+    r = client.get(f"/v1/sessions/{sid}/tasks", headers=auth())
+    assert r.status_code == 200, r.text
+    tasks = {t["task_id"]: t for t in r.json()["tasks"]}
+    assert set(tasks) == {done, pending}
+    assert tasks[done]["status"] == "done" and tasks[done]["seq"] == 1
+    assert tasks[done]["duration_ms"] is not None
+    assert tasks[pending]["status"] == "pending_upload" and tasks[pending]["seq"] is None
+    # 别的租户看不见
+    assert client.get(f"/v1/sessions/{sid}/tasks", headers=auth(KEY_B)).status_code == 404

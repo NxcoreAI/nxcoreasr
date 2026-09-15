@@ -54,6 +54,7 @@ Base：`/v1`，全部需要 `Authorization: Bearer <api_key>`（health 也包括
 | GET | `/sessions` | 会话列表带统计 |
 | DELETE | `/sessions/{sid}` | 删除会话（全清），幂等；仅属主租户可删 |
 | GET | `/tasks/{tid}` | 任务状态；done 时含 `utterances` |
+| GET | `/sessions/{sid}/tasks` | 会话内任务列表（按 seq 倒序，limit 默认 50 上限 200） |
 | GET | `/sessions/{sid}/results?after=0` | 按游标增量拉全会话结果，响应带 `session_version` |
 | POST | `/tasks/{tid}/retry` | 重试失败任务（原始音频已删则提示重传） |
 | GET | `/sessions/{sid}/speakers` | 说话人列表 |
