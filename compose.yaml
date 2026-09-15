@@ -1,0 +1,21 @@
+services:
+  pg:
+    image: postgres:16-alpine
+    container_name: nxcore-asr-pg
+    ports:
+      - "127.0.0.1:25432:5432"
+    environment:
+      POSTGRES_USER: asr_admin
+      POSTGRES_PASSWORD: asr_admin_dev_only
+      POSTGRES_DB: asr
+    volumes:
+      - nxcore-asr-pg-data:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U asr_admin -d asr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  nxcore-asr-pg-data:

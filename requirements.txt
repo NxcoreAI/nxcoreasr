@@ -1,0 +1,17 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pyyaml>=6.0
+numpy>=1.26
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+
+# 真引擎（约 2GB 依赖；仅跑测试可不装，用 ASR_FAKE_ENGINE=1）
+funasr>=1.1
+modelscope>=1.15
+torch>=2.2
+torchaudio>=2.2
+
+# 测试
+pytest>=8.0
+httpx>=0.27

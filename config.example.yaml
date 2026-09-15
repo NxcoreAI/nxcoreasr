@@ -1,0 +1,14 @@
+data_dir: ./data
+model_dir: ./models   # 模型本地目录（不入 git）；缺失时启动自动从 modelscope 下载
+database_url: postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:25432/asr  # docker compose up -d 起库；可用环境变量 ASR_DATABASE_URL 覆盖
+max_workers: 2          # 全局并发转写数（同会话内始终串行）
+speaker_threshold: 0.6  # 跨音频认人的余弦相似度阈值，拿真实音频验证后再调
+max_upload_mb: 50
+
+# 租户身份只由 api_key 推导（唯一身份层级，无注册接口）。
+# 启动校验会拒绝占位符和短 key：用 openssl rand -hex 32 生成后填入。
+tenants:
+  - name: saas_a
+    api_key: CHANGE_ME_KEY_A
+  - name: saas_b
+    api_key: CHANGE_ME_KEY_B

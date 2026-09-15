@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nxcore-asr 测试台</title>
+<style>
+  :root { --line:#e2e2e2; --muted:#777; --accent:#1a56db; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; color:#1b1b1b; background:#fafafa; }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:12px 20px; background:#fff; border-bottom:1px solid var(--line); }
+  header .title { font-weight:600; margin-right:8px; }
+  input, select, button { font:inherit; padding:5px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:#b42318; }
+  button.rec-on { background:#b42318; border-color:#b42318; color:#fff; }
+  main { display:grid; grid-template-columns:1fr 320px; gap:16px; padding:16px 20px; max-width:1100px; }
+  section, aside > div { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:16px; }
+  h2 { font-size:14px; margin:0 0 10px; display:flex; align-items:center; gap:8px; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:12px; }
+  .utt { padding:6px 0; border-bottom:1px solid #f0f0f0; }
+  .utt:last-child { border-bottom:none; }
+  .utt .who { font-weight:600; margin-right:8px; }
+  .utt .t { color:var(--muted); font-size:12px; margin-left:8px; }
+  .spk { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #f0f0f0; }
+  .spk:last-child { border-bottom:none; }
+  .spk .nm { font-weight:600; }
+  #taskStatus { font-size:13px; }
+  #err { color:#b42318; font-size:13px; padding:0 20px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">nxcore-asr 测试台</span>
+  <input id="key" placeholder="API Key" size="22">
+  <select id="sessions"></select>
+  <input id="extid" placeholder="external_id" size="12">
+  <button id="btnReg">注册会话</button>
+  <button id="btnDel" class="danger">删除会话</button>
+  <span id="health" class="muted"></span>
+</header>
+<div id="err"></div>
+<main>
+  <div>
+    <section>
+      <div class="bar">
+        <button id="btnRec" class="primary">开始录音</button>
+        <input type="file" id="file" accept="audio/*">
+        <button id="btnUpload">上传文件</button>
+        <span id="taskStatus" class="muted"></span>
+      </div>
+    </section>
+    <section>
+      <h2>转写结果 <button id="btnRefresh">刷新</button> <span id="ver" class="muted"></span></h2>
+      <div id="results" class="muted">—</div>
+    </section>
+  </div>
+  <aside>
+    <div>
+      <h2>说话人</h2>
+      <div id="speakers" class="muted">—</div>
+      <div class="bar" style="margin-top:10px">
+        <select id="mFrom"></select>
+        <span>并入</span>
+        <select id="mInto"></select>
+        <button id="btnMerge">合并</button>
+      </div>
+    </div>
+  </aside>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const err = m => { $("err").textContent = m || ""; };
+
+$("key").value = localStorage.getItem("asr_key") || "";
+$("key").addEventListener("change", () => localStorage.setItem("asr_key", $("key").value.trim()));
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({ "Authorization": "Bearer " + $("key").value.trim() }, opts.headers || {});
+  const r = await fetch("/v1" + path, opts);
+  if (!r.ok) {
+    let d = ""; try { d = (await r.json()).detail; } catch {}
+    throw new Error(`${r.status} ${d || r.statusText}`);
+  }
+  return r.json();
+}
+const jpost = (path, body, method = "POST") => api(path, {
+  method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+});
+
+const sid = () => $("sessions").value;
+const extById = {};
+
+async function loadSessions(selectId) {
+  const d = await api("/sessions");
+  const sel = $("sessions");
+  sel.innerHTML = "";
+  for (const s of d.sessions) {
+    extById[s.session_id] = s.external_id;
+    const o = document.createElement("option");
+    o.value = s.session_id;
+    o.textContent = `${s.external_id}（${s.done_count}/${s.audio_count}）`;
+    sel.appendChild(o);
+  }
+  if (selectId) sel.value = selectId;
+  await refresh();
+}
+
+async function refresh() {
+  if (!sid()) { $("results").textContent = "—"; $("speakers").textContent = "—"; $("ver").textContent = ""; return; }
+  const [res, spk] = await Promise.all([
+    api(`/sessions/${sid()}/results`),
+    api(`/sessions/${sid()}/speakers`),
+  ]);
+  $("ver").textContent = "v" + res.session_version;
+  const box = $("results");
+  box.classList.toggle("muted", !res.utterances.length);
+  box.innerHTML = "";
+  if (!res.utterances.length) box.textContent = "—";
+  for (const u of res.utterances) {
+    const div = document.createElement("div");
+    div.className = "utt";
+    const t = `${(u.start_ms/1000).toFixed(1)}–${(u.end_ms/1000).toFixed(1)}s`;
+    div.innerHTML = `<span class="who"></span><span class="tx"></span><span class="t">${t}</span>`;
+    div.querySelector(".who").textContent = u.person_name;
+    div.querySelector(".tx").textContent = u.text;
+    box.appendChild(div);
+  }
+  const sb = $("speakers");
+  sb.classList.toggle("muted", !spk.speakers.length);
+  sb.innerHTML = "";
+  if (!spk.speakers.length) sb.textContent = "—";
+  const mf = $("mFrom"), mi = $("mInto");
+  mf.innerHTML = mi.innerHTML = "";
+  for (const s of spk.speakers) {
+    const row = document.createElement("div");
+    row.className = "spk";
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = s.display_name || s.auto_label;
+    row.appendChild(nm);
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.textContent = `${s.utterance_count} 句 · ${s.audio_count} 段`;
+    row.appendChild(meta);
+
+    const setName = async (name) => {
+      try {
+        await jpost(`/sessions/${sid()}/speakers/${s.person_id}/name`, { name }, "PUT");
+        await refresh();
+      } catch (e) { err(e.message); }
+    };
+    const btnName = document.createElement("button");
+    btnName.textContent = s.named ? "改名" : "命名";
+    btnName.onclick = () => {
+      row.innerHTML = "";
+      const inp = document.createElement("input");
+      inp.value = s.display_name || "";
+      inp.size = 10;
+      inp.maxLength = 64;
+      const ok = document.createElement("button");
+      ok.className = "primary";
+      ok.textContent = "保存";
+      ok.onclick = () => setName(inp.value.trim() || null);
+      const cancel = document.createElement("button");
+      cancel.textContent = "取消";
+      cancel.onclick = () => refresh().catch(e => err(e.message));
+      inp.addEventListener("keydown", e => {
+        if (e.key === "Enter") ok.onclick();
+        if (e.key === "Escape") cancel.onclick();
+      });
+      row.append(inp, ok, cancel);
+      inp.focus();
+    };
+    row.appendChild(btnName);
+    if (s.named) {
+      const btnClear = document.createElement("button");
+      btnClear.textContent = "清除";
+      btnClear.onclick = () => setName(null);
+      row.appendChild(btnClear);
+    }
+    for (const child of s.merged_person_ids) {
+      const b = document.createElement("button");
+      b.textContent = "撤销合并";
+      b.onclick = async () => {
+        try { await jpost(`/sessions/${sid()}/speakers/${child}/unmerge`, {}); await refresh(); }
+        catch (e) { err(e.message); }
+      };
+      row.appendChild(b);
+    }
+    sb.appendChild(row);
+    for (const sel of [mf, mi]) {
+      const o = document.createElement("option");
+      o.value = s.person_id;
+      o.textContent = s.display_name || s.auto_label;
+      sel.appendChild(o);
+    }
+  }
+}
+
+$("btnReg").onclick = async () => {
+  err("");
+  const ext = $("extid").value.trim();
+  if (!ext) return err("请填 external_id");
+  try { const d = await jpost("/sessions", { external_id: ext }); await loadSessions(d.session_id); }
+  catch (e) { err(e.message); }
+};
+
+$("btnDel").onclick = async () => {
+  if (!sid() || !confirm("删除该会话？结果与说话人库将全部清除，不可恢复。")) return;
+  try { await api(`/sessions/${sid()}`, { method: "DELETE" }); await loadSessions(); }
+  catch (e) { err(e.message); }
+};
+
+$("sessions").onchange = refresh;
+$("btnRefresh").onclick = () => refresh().catch(e => err(e.message));
+
+async function uploadBlob(blob, targetSid) {
+  const s = targetSid || sid();
+  const ext = extById[s];
+  if (!ext) return err("请先注册/选择会话");
+  err("");
+  // 四步：建 job（同 external_id 落同一会话）→ 授权 → PUT 裸字节 → 确认入队
+  const job = await jpost("/asr-jobs", { external_id: ext });
+  if (job.status === "pending_upload" || job.status === "uploaded") {
+    const authz = await jpost(`/asr-jobs/${job.job_id}/upload-authorization`, {});
+    const r = await fetch(authz.upload_url, {
+      method: "PUT",
+      headers: {
+        "Authorization": "Bearer " + $("key").value.trim(),
+        "Content-Type": "application/octet-stream",
+      },
+      body: blob,
+    });
+    if (!r.ok) throw new Error(`直传失败 ${r.status}`);
+    await jpost(`/asr-jobs/${job.job_id}/upload-complete`, {});
+  }
+  $("taskStatus").textContent = "排队中…";
+  const poll = async () => {
+    const t = await api(`/tasks/${job.job_id}`);
+    if (t.status === "done") {
+      $("taskStatus").textContent = `完成，耗时 ${(t.duration_ms/1000).toFixed(1)}s`;
+      await refresh(); await loadSessions(sid());
+    } else if (t.status === "failed") {
+      $("taskStatus").textContent = "失败：" + t.error;
+    } else {
+      $("taskStatus").textContent = t.status === "processing" ? "转写中…" : "排队中…";
+      setTimeout(() => poll().catch(e => err(e.message)), 1500);
+    }
+  };
+  poll().catch(e => err(e.message));
+}
+
+$("btnUpload").onclick = () => {
+  const f = $("file").files[0];
+  if (!f) return err("请先选择音频文件");
+  uploadBlob(f).catch(e => err(e.message));
+};
+
+// 每段独立起一个完整录制再停：webm 分片只有首片带文件头，后端解不开，必须整文件切换
+let recorder = null, stream = null, segTimer = null, chunks = [], recSid = null;
+
+function startSegment() {
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+    if (blob.size) uploadBlob(blob, recSid).catch(e => err(e.message));
+    if (stream) startSegment();
+    else {
+      recorder = null;
+      $("btnRec").textContent = "开始录音";
+      $("btnRec").classList.replace("rec-on", "primary");
+    }
+  };
+  recorder.start();
+}
+
+$("btnRec").onclick = async () => {
+  err("");
+  if (recorder || stream) {
+    clearInterval(segTimer); segTimer = null;
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    return;
+  }
+  recSid = sid();
+  if (!recSid) return err("请先注册/选择会话");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) { return err("无法访问麦克风：" + e.message); }
+  startSegment();
+  segTimer = setInterval(() => {
+    if (recorder && recorder.state === "recording") recorder.stop();
+  }, 60000);
+  $("btnRec").textContent = "录音中（每分钟自动上传）";
+  $("btnRec").classList.replace("primary", "rec-on");
+};
+
+(async () => {
+  try {
+    const h = await api("/health");
+    $("health").textContent = `引擎 ${h.engine} · 队列 ${h.queue.queued}`;
+  } catch {}
+  if ($("key").value) loadSessions().catch(e => err(e.message));
+})();
+</script>
+</body>
+</html>
