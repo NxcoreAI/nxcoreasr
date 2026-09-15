@@ -274,6 +274,7 @@ function startSegment() {
       recorder = null;
       $("btnRec").textContent = "开始录音";
       $("btnRec").classList.replace("rec-on", "primary");
+      for (const id of ["sessions", "btnReg", "btnDel"]) $(id).disabled = false;
     }
   };
   recorder.start();
@@ -293,6 +294,8 @@ $("btnRec").onclick = async () => {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) { return err("无法访问麦克风：" + e.message); }
+  // 录音目标已锁定：期间禁用会话切换/注册/删除，避免看着别的会话以为没结果
+  for (const id of ["sessions", "btnReg", "btnDel"]) $(id).disabled = true;
   startSegment();
   segTimer = setInterval(() => {
     if (recorder && recorder.state === "recording") recorder.stop();
