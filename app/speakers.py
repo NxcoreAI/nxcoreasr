@@ -64,7 +64,10 @@ def name_map(db: Session, session_id: str) -> dict[str, dict]:
 
 
 def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: float) -> str:
-    """与会话内各根人的质心比余弦；达标归入并滑动更新质心，否则新建。"""
+    """与会话内各根人的质心比余弦；达标归入并滑动更新质心，否则新建。
+
+    centroid 存的是各成员向量的真实均值（未归一化），比较时归一，
+    这样滑动更新 (均值*n + 新向量)/(n+1) 才是精确的。"""
     emb = normalize(emb)
     persons = load_persons(db, session_id)
     best: Person | None = None
@@ -77,15 +80,13 @@ def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: fl
             best, best_sim = p, sim
     if best is not None and best_sim >= threshold:
         n = best.embed_count
-        centroid = normalize(
-            (np.frombuffer(best.centroid, dtype=np.float32) * n + emb) / (n + 1)
-        )
+        centroid = (np.frombuffer(best.centroid, dtype=np.float32) * n + emb) / (n + 1)
         best.centroid = np.asarray(centroid, dtype=np.float32).tobytes()
         best.embed_count = n + 1
         return best.id
-    count = len(persons)
+    root_count = sum(1 for p in persons.values() if not p.merged_into)
     pid = _new_person_id()
-    db.add(Person(id=pid, session_id=session_id, auto_label=f"说话人{count + 1}",
+    db.add(Person(id=pid, session_id=session_id, auto_label=f"说话人{root_count + 1}",
                   centroid=np.asarray(emb, dtype=np.float32).tobytes(), embed_count=1))
     return pid
 
