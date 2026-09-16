@@ -1,7 +1,7 @@
-"""FunASR 真引擎：paraformer-zh + fsmn-vad + ct-punc + cam++（全 CPU）。
+"""FunASR 真引擎：Fun-ASR-Nano（端到端，自带标点）+ fsmn-vad + cam++（全 CPU）。
 
 模型从本地 model_dir 加载；目录缺失时启动阶段自动从 modelscope
-下载到该目录（首次约 2.1GB，之后不再联网）。
+下载到该目录（首次约 4GB，之后不再联网）。
 """
 import logging
 import wave
@@ -17,9 +17,8 @@ MAX_EMBED_SECONDS = 20  # 提音色向量最多取 20 秒素材，够用且省�
 
 # 模型目录名 -> modelscope 上的下载标识
 MODELS = {
-    "paraformer-zh": "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    "fun-asr-nano": "FunAudioLLM/Fun-ASR-Nano-2512",
     "fsmn-vad": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-    "ct-punc": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
     "cam-plus": "iic/speech_campplus_sv_zh-cn_16k-common",
 }
 
@@ -41,9 +40,9 @@ class FunasrEngine(Engine):
 
         log.info("加载 FunASR 模型（本地 %s）...", model_dir)
         self.asr = AutoModel(
-            model=_local(model_dir, "paraformer-zh"),
+            model=_local(model_dir, "fun-asr-nano"),
             vad_model=_local(model_dir, "fsmn-vad"),
-            punc_model=_local(model_dir, "ct-punc"),
+            vad_kwargs={"max_single_segment_time": 30000},
             spk_model=_local(model_dir, "cam-plus"),
             device="cpu",
             disable_update=True,
