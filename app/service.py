@@ -5,6 +5,7 @@
 import logging
 import subprocess
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -96,8 +97,14 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, tenant: str, task_id
     wav = src + ".16k.wav"
     started = time.monotonic()
     try:
+        t = time.monotonic()
         transcode(src, wav)
+        transcode_ms = int((time.monotonic() - t) * 1000)
+        with wave.open(wav, "rb") as w:
+            record_ms = int(w.getnframes() / w.getframerate() * 1000)
+        t = time.monotonic()
         segments = engine.transcribe(wav)
+        transcribe_ms = int((time.monotonic() - t) * 1000)
         segments.sort(key=lambda s: s.start_ms)
 
         # 音频内聚类合并 FunASR 的碎编号，再与会话说话人库对齐
@@ -124,8 +131,12 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, tenant: str, task_id
                        .where(SessionRecord.id == session_id)
                        .values(last_active_at=now_iso()))
         Path(src).unlink(missing_ok=True)  # 转写成功即删原始音频
-        log.info("任务完成 tenant=%s task=%s 耗时=%dms 句数=%d",
-                 tenant, task_id, elapsed_ms, len(segments))
+        speech_ms = sum(s.end_ms - s.start_ms for s in segments)
+        speech_pct = speech_ms * 100 // record_ms if record_ms else 0
+        log.info("任务完成 tenant=%s task=%s 耗时=%dms 句数=%d 录音=%.1fs 语音=%.1fs(%d%%) 转码=%dms 转写=%dms",
+                 tenant, task_id, elapsed_ms, len(segments),
+                 record_ms / 1000, speech_ms / 1000, speech_pct,
+                 transcode_ms, transcribe_ms)
     except Exception as e:
         # 保留原始音频供 retry
         with tenant_session(db_engine, tenant) as db:
