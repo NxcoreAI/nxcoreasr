@@ -272,21 +272,41 @@ class FunasrEngine(Engine):
         if llm_quantize:
             # 只量化 LLM 分支（文本生成，参数量大头）。逐字时间戳由 CTC 分支
             # 独立产出、cam++/vad 是独立模型，说话人分离不受影响
+            import platform
+
             import torch
             engines = [e for e in torch.backends.quantized.supported_engines
                        if e != "noqengine"]
             if not engines:  # 极少数无量化后端的 torch 构建，放弃量化保启动
                 log.warning("当前 torch 构建无量化后端，跳过 LLM 量化")
             else:
-                # x86 用 fbgemm、arm 用 qnnpack，取各自平台支持的第一顺位
-                torch.backends.quantized.engine = engines[0]
+                # x86 用 onednn/fbgemm（qnnpack 在 x86 上是通用实现，实测慢
+                # 一个量级）；arm 用 qnnpack（NEON/AMX 原生路径）
+                prefer = ("onednn", "fbgemm", "qnnpack") \
+                    if platform.machine() in ("x86_64", "AMD64") \
+                    else ("qnnpack", "onednn", "fbgemm")
+                engine = next((e for e in prefer if e in engines), engines[0])
+                torch.backends.quantized.engine = engine
+
+                def _rss_mb():  # 量化各阶段的内存取证（Linux 读 /proc）
+                    try:
+                        with open("/proc/self/status") as f:
+                            for line in f:
+                                if line.startswith("VmRSS:"):
+                                    return int(line.split()[1]) / 1024
+                    except OSError:
+                        pass
+                    return -1
+
+                log.info("量化前 RSS %.0fMB", _rss_mb())
                 llm = self.asr.model.llm
                 self.asr.model.llm = torch.ao.quantization.quantize_dynamic(
                     llm, {torch.nn.Linear}, dtype=torch.qint8)
-                del llm  # 尽快释放原 bf16 权重，让系统回收内存（Linux 立即生效）
+                del llm  # 释放原 bf16 权重
                 import gc
                 gc.collect()
-                log.info("LLM 分支已 int8 动态量化（引擎 %s）", engines[0])
+                log.info("LLM 分支已 int8 动态量化（引擎 %s），量化后 RSS %.0fMB",
+                         engine, _rss_mb())
         self.vad = AutoModel(model=_local(model_dir, "fsmn-vad"), device="cpu",
                              disable_update=True)
         self.spk = AutoModel(model=_local(model_dir, "cam-plus"), device="cpu",
