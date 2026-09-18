@@ -24,6 +24,7 @@ class AppConfig:
     data_dir: Path
     model_dir: Path = Path("./models")
     max_workers: int = 2
+    llm_quantize: bool = False
     speaker_threshold: float = 0.45
     speaker_window_threshold: float = 0.65
     speaker_min_enroll_ms: int = 6000
@@ -72,6 +73,7 @@ def load_config(path: str | None = None) -> AppConfig:
         data_dir=Path(raw.get("data_dir", "./data")).resolve(),
         model_dir=Path(raw.get("model_dir", "./models")).resolve(),
         max_workers=int(raw.get("max_workers", 2)),
+        llm_quantize=bool(raw.get("llm_quantize", False)),
         speaker_threshold=float(raw.get("speaker_threshold", 0.45)),
         speaker_window_threshold=float(raw.get("speaker_window_threshold", 0.65)),
         speaker_min_enroll_ms=int(raw.get("speaker_min_enroll_ms", 6000)),

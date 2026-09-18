@@ -49,7 +49,7 @@ def _build_engine_(cfg):
         from .engine.fake_engine import FakeEngine
         return FakeEngine()
     from .engine.funasr_engine import FunasrEngine
-    return FunasrEngine(cfg.model_dir, cfg.speaker_window_threshold)
+    return FunasrEngine(cfg.model_dir, cfg.speaker_window_threshold, cfg.llm_quantize)
 
 
 def create_app(config_path: str | None = None) -> FastAPI:

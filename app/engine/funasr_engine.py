@@ -254,7 +254,8 @@ def merge_short_fragments(segs: list[Segment], min_ms: int = MIN_RUN_MS) -> list
 class FunasrEngine(Engine):
     name = "funasr"
 
-    def __init__(self, model_dir: Path, window_threshold: float = 0.65):
+    def __init__(self, model_dir: Path, window_threshold: float = 0.65,
+                 llm_quantize: bool = False):
         from funasr import AutoModel  # 延迟导入，fake 模式不需要装
 
         log.info("加载 FunASR 模型（本地 %s）...", model_dir)
@@ -268,6 +269,24 @@ class FunasrEngine(Engine):
             device="cpu",
             disable_update=True,
         )
+        if llm_quantize:
+            # 只量化 LLM 分支（文本生成，参数量大头）。逐字时间戳由 CTC 分支
+            # 独立产出、cam++/vad 是独立模型，说话人分离不受影响
+            import torch
+            engines = [e for e in torch.backends.quantized.supported_engines
+                       if e != "noqengine"]
+            if not engines:  # 极少数无量化后端的 torch 构建，放弃量化保启动
+                log.warning("当前 torch 构建无量化后端，跳过 LLM 量化")
+            else:
+                # x86 用 fbgemm、arm 用 qnnpack，取各自平台支持的第一顺位
+                torch.backends.quantized.engine = engines[0]
+                llm = self.asr.model.llm
+                self.asr.model.llm = torch.ao.quantization.quantize_dynamic(
+                    llm, {torch.nn.Linear}, dtype=torch.qint8)
+                del llm  # 尽快释放原 bf16 权重，让系统回收内存（Linux 立即生效）
+                import gc
+                gc.collect()
+                log.info("LLM 分支已 int8 动态量化（引擎 %s）", engines[0])
         self.vad = AutoModel(model=_local(model_dir, "fsmn-vad"), device="cpu",
                              disable_update=True)
         self.spk = AutoModel(model=_local(model_dir, "cam-plus"), device="cpu",
