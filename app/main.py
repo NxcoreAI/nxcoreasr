@@ -48,6 +48,12 @@ def _build_engine_(cfg):
     if os.environ.get("ASR_FAKE_ENGINE") == "1":
         from .engine.fake_engine import FakeEngine
         return FakeEngine()
+    if cfg.engine == "llamacpp":
+        if not (cfg.llamacpp_bin and cfg.llamacpp_dir):
+            raise ValueError("engine=llamacpp 需要同时配置 llamacpp_bin 和 llamacpp_dir")
+        from .engine.llamacpp_engine import LlamaCppEngine
+        return LlamaCppEngine(cfg.model_dir, cfg.llamacpp_bin, cfg.llamacpp_dir,
+                              cfg.llamacpp_llm, cfg.speaker_window_threshold)
     from .engine.funasr_engine import FunasrEngine
     return FunasrEngine(cfg.model_dir, cfg.speaker_window_threshold, cfg.llm_quantize)
 

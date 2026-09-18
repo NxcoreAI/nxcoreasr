@@ -330,7 +330,10 @@ class FunasrEngine(Engine):
             return [Segment(0, dur, text, 0)]
         tokens = [{"token": t["token"], "start": int(t["start_time"] * 1000),
                    "end": int(t["end_time"] * 1000)} for t in raw_tokens]
+        return self._diarize(wav_path, tokens)
 
+    def _diarize(self, wav_path: str, tokens: list[dict]) -> list[Segment]:
+        """逐字时间戳 + cam++ 滑窗聚类 -> 按时间线归人、切分说话片段。"""
         vr = self.vad.generate(input=wav_path)[0]
         regions = [(int(a), int(b)) for a, b in vr.get("value") or []]
         wins = slide_windows(regions)

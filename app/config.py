@@ -22,6 +22,10 @@ DEFAULT_DATABASE_URL = "postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:
 @dataclass
 class AppConfig:
     data_dir: Path
+    engine: str = "funasr"
+    llamacpp_bin: str = ""
+    llamacpp_dir: str = ""
+    llamacpp_llm: str = "qwen3-0.6b-q4km.gguf"
     model_dir: Path = Path("./models")
     max_workers: int = 2
     llm_quantize: bool = False
@@ -71,6 +75,10 @@ def load_config(path: str | None = None) -> AppConfig:
         _validate_tenant(t)
     return AppConfig(
         data_dir=Path(raw.get("data_dir", "./data")).resolve(),
+        engine=str(raw.get("engine", "funasr")),
+        llamacpp_bin=str(raw.get("llamacpp_bin", "")),
+        llamacpp_dir=str(raw.get("llamacpp_dir", "")),
+        llamacpp_llm=str(raw.get("llamacpp_llm", "qwen3-0.6b-q4km.gguf")),
         model_dir=Path(raw.get("model_dir", "./models")).resolve(),
         max_workers=int(raw.get("max_workers", 2)),
         llm_quantize=bool(raw.get("llm_quantize", False)),
