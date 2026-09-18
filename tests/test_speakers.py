@@ -76,15 +76,91 @@ def test_match_threshold_unit(test_database):
         db.add(SessionRecord(id="s1", tenant_id="t", external_id="x", status="active",
                              version=1, created_at=now_iso(), last_active_at=now_iso()))
         v = np.zeros(8); v[0] = 1.0
-        p1 = match_or_create(db, "s1", v, 0.6)
+        p1 = match_or_create(db, "s1", v, 0.6, 10_000.0, 6_000.0)
         # 很相近的向量 → 同一个人
         v2 = np.zeros(8); v2[0] = 1.0; v2[1] = 0.1
-        assert match_or_create(db, "s1", v2, 0.6) == p1
-        # 正交向量 → 新人
+        assert match_or_create(db, "s1", v2, 0.6, 1_000.0, 6_000.0) == p1
+        # 正交向量但素材充足 → 新人
         v3 = np.zeros(8); v3[3] = 1.0
-        p3 = match_or_create(db, "s1", v3, 0.6)
+        p3 = match_or_create(db, "s1", v3, 0.6, 10_000.0, 6_000.0)
         assert p3 != p1
+        # 正交向量但素材不足 → 不新建，挂最像的已有说话人（碎片声纹防线）
+        v4 = np.zeros(8); v4[6] = 1.0
+        assert match_or_create(db, "s1", v4, 0.6, 2_000.0, 6_000.0) in (p1, p3)
+        # 素材不足 + 空库 → 保底新建（首段音频锚点）
+        db.add(SessionRecord(id="s2", tenant_id="t", external_id="y", status="active",
+                             version=1, created_at=now_iso(), last_active_at=now_iso()))
+        v5 = np.zeros(8); v5[0] = 1.0
+        assert match_or_create(db, "s2", v5, 0.6, 500.0, 6_000.0).startswith("spk_")
+
+        # 擦边区：最佳相似度落在 [阈值-0.10, 阈值) 且素材充足 → 挂最像的
+        # 已有人，不新建也不动质心（防止幽灵声纹随录音数累积）
+        from app.db import Person
+        db.add(SessionRecord(id="s3", tenant_id="t", external_id="z", status="active",
+                             version=1, created_at=now_iso(), last_active_at=now_iso()))
+        g1 = np.zeros(8); g1[0] = 1.0
+        gp = match_or_create(db, "s3", g1, 0.6, 10_000.0, 6_000.0)
+        before = db.get(Person, gp)
+        ang = np.deg2rad(55)  # cos55°≈0.574，落在 [0.5, 0.6)
+        g2 = np.zeros(8); g2[0] = np.cos(ang); g2[1] = np.sin(ang)
+        assert match_or_create(db, "s3", g2, 0.6, 10_000.0, 6_000.0) == gp
+        after = db.get(Person, gp)
+        assert after.embed_count == before.embed_count == 1
+        assert after.centroid == before.centroid
+        # 会话内仍只有一个人
+        assert len(db.scalars(select(Person).where(Person.session_id == "s3")).all()) == 1
     eng.dispose()
+
+
+def test_results_filter_by_person(client):
+    sid = register(client)
+    for _ in range(2):
+        wait_done(client, upload(client, sid))
+    sp = _speakers(client, sid)
+    assert len(sp) == 2
+    for s in sp:
+        r = client.get(f"/v1/sessions/{sid}/results",
+                       params={"person_id": s["person_id"]}, headers=auth()).json()
+        # fake engine 每段音频每人一句，两段共两句，且全落在这人名下
+        assert len(r["utterances"]) == 2
+        assert all(u["person_id"] == s["person_id"] for u in r["utterances"])
+        # 两次录音里都有这个人
+        assert len({u["task_id"] for u in r["utterances"]}) == 2
+    # 不存在的说话人 → 404
+    r = client.get(f"/v1/sessions/{sid}/results",
+                   params={"person_id": "spk_nope"}, headers=auth())
+    assert r.status_code == 404
+    # 合并后：按根人过滤应包含被并一方的段落，按被并方过滤则查不到
+    p1, p2 = sp[0]["person_id"], sp[1]["person_id"]
+    client.post(f"/v1/sessions/{sid}/speakers/merge",
+                json={"from_person": p1, "into_person": p2}, headers=auth())
+    r = client.get(f"/v1/sessions/{sid}/results",
+                   params={"person_id": p2}, headers=auth()).json()
+    assert len(r["utterances"]) == 4
+    assert all(u["person_id"] == p2 for u in r["utterances"])
+
+
+def test_speaker_tasks_drill_down(client):
+    sid = register(client)
+    for _ in range(2):
+        wait_done(client, upload(client, sid))
+    sp = _speakers(client, sid)
+    assert len(sp) == 2
+    r = client.get(f"/v1/sessions/{sid}/speakers/{sp[0]['person_id']}/tasks",
+                   headers=auth()).json()
+    assert r["person_id"] == sp[0]["person_id"]
+    # fake engine：每段音频每人一句 → 该人两次录音各 1 句，按 seq 升序
+    assert [t["seq"] for t in r["tasks"]] == [1, 2]
+    assert all(t["utterance_count"] == 1 and t["spoken_ms"] >= 0 for t in r["tasks"])
+    # 不存在的说话人 → 404
+    assert client.get(f"/v1/sessions/{sid}/speakers/spk_nope/tasks",
+                      headers=auth()).status_code == 404
+    # 合并后：根人的录音列表涵盖双方段落
+    p1, p2 = sp[0]["person_id"], sp[1]["person_id"]
+    client.post(f"/v1/sessions/{sid}/speakers/merge",
+                json={"from_person": p1, "into_person": p2}, headers=auth())
+    r = client.get(f"/v1/sessions/{sid}/speakers/{p2}/tasks", headers=auth()).json()
+    assert all(t["utterance_count"] == 2 for t in r["tasks"])
 
 
 def test_audit_trail(client):

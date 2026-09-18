@@ -24,7 +24,9 @@ class AppConfig:
     data_dir: Path
     model_dir: Path = Path("./models")
     max_workers: int = 2
-    speaker_threshold: float = 0.5
+    speaker_threshold: float = 0.45
+    speaker_window_threshold: float = 0.65
+    speaker_min_enroll_ms: int = 6000
     max_upload_mb: int = 50
     database_url: str = DEFAULT_DATABASE_URL
     tenants: list[Tenant] = field(default_factory=list)
@@ -70,7 +72,9 @@ def load_config(path: str | None = None) -> AppConfig:
         data_dir=Path(raw.get("data_dir", "./data")).resolve(),
         model_dir=Path(raw.get("model_dir", "./models")).resolve(),
         max_workers=int(raw.get("max_workers", 2)),
-        speaker_threshold=float(raw.get("speaker_threshold", 0.5)),
+        speaker_threshold=float(raw.get("speaker_threshold", 0.45)),
+        speaker_window_threshold=float(raw.get("speaker_window_threshold", 0.65)),
+        speaker_min_enroll_ms=int(raw.get("speaker_min_enroll_ms", 6000)),
         max_upload_mb=int(raw.get("max_upload_mb", 50)),
         database_url=os.environ.get("ASR_DATABASE_URL")
         or str(raw.get("database_url", DEFAULT_DATABASE_URL)),

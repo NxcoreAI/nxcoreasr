@@ -49,7 +49,7 @@ def _build_engine_(cfg):
         from .engine.fake_engine import FakeEngine
         return FakeEngine()
     from .engine.funasr_engine import FunasrEngine
-    return FunasrEngine(cfg.model_dir)
+    return FunasrEngine(cfg.model_dir, cfg.speaker_window_threshold)
 
 
 def create_app(config_path: str | None = None) -> FastAPI:
@@ -330,13 +330,20 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/v1/sessions/{sid}/results")
     def get_results(sid: str, request: Request, after: int = 0, limit: int = 500,
+                    person_id: str | None = None,
                     tenant: str = Depends(require_tenant)):
         session = _get_session(request.app.state.db_engine, tenant, sid)
         limit = max(1, min(limit, 2000))
         with tenant_session(request.app.state.db_engine, tenant) as db:
-            rows = db.scalars(select(Utterance)
-                              .where(Utterance.session_id == sid, Utterance.id > after)
-                              .order_by(Utterance.id).limit(limit)).all()
+            q = select(Utterance).where(Utterance.session_id == sid, Utterance.id > after)
+            if person_id:
+                names = spk.name_map(db, sid)
+                if person_id not in names:
+                    raise HTTPException(404, "说话人不存在")
+                # 命中合并前的旧编号也算：按根人归拢后过滤
+                pids = [p for p, n in names.items() if n["person_id"] == person_id]
+                q = q.where(Utterance.person_id.in_(pids))
+            rows = db.scalars(q.order_by(Utterance.id).limit(limit)).all()
             items = _utterances_payload(db, sid, rows)
         return {"session_id": sid, "session_version": session.version,
                 "utterances": items,
@@ -374,6 +381,17 @@ def create_app(config_path: str | None = None) -> FastAPI:
             items = spk.list_speakers(db, sid)
         return {"session_id": sid, "session_version": session.version, "speakers": items}
 
+    @app.get("/v1/sessions/{sid}/speakers/{pid}/tasks")
+    def speaker_tasks(sid: str, pid: str, request: Request,
+                      tenant: str = Depends(require_tenant)):
+        session = _get_session(request.app.state.db_engine, tenant, sid)
+        try:
+            with tenant_session(request.app.state.db_engine, tenant) as db:
+                body = spk.speaker_tasks(db, sid, pid)
+        except SpeakerError as e:
+            raise HTTPException(e.status, e.detail)
+        return {"session_id": sid, "session_version": session.version, **body}
+
     @app.put("/v1/sessions/{sid}/speakers/{pid}/name")
     def set_name(sid: str, pid: str, body: NameReq, request: Request,
                  tenant: str = Depends(require_tenant)):
@@ -405,6 +423,11 @@ def create_app(config_path: str | None = None) -> FastAPI:
     def console():
         """内置测试台（页面本身无鉴权，接口调用仍需 API key）。"""
         return FileResponse(Path(__file__).parent / "static" / "console.html")
+
+    @app.get("/panel")
+    def panel():
+        """说话人检视面板：说话人 → 录音 → 段落 三级下钻。"""
+        return FileResponse(Path(__file__).parent / "static" / "panel.html")
 
     @app.get("/v1/health")
     def health(request: Request, tenant: str = Depends(require_tenant)):

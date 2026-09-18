@@ -59,17 +59,24 @@ def cluster_local_speakers(engine: Engine, wav: str, segments, threshold: float)
     anchor_ids = {id(c) for c in anchor_ms}
     floats = [c for c in clusters if id(c) not in anchor_ids]
 
-    merged: list[dict] = []
-    for c in anchor_ms:
-        best, best_sim = None, -1.0
-        for m in merged:
-            sim = float(np.dot(c["emb"], m["emb"]))
-            if sim > best_sim:
-                best, best_sim = m, sim
-        if best is not None and best_sim >= threshold:
-            _absorb(best, c)
-        else:
-            merged.append(c)
+    # 合并到收敛：第一轮并入会改变簇质心，A、C 擦边但经 B 中转本应合并的
+    # 情况只有再过一轮才能发现（簇数单调下降，必然终止）
+    while True:
+        merged: list[dict] = []
+        for c in anchor_ms:
+            best, best_sim = None, -1.0
+            for m in merged:
+                sim = float(np.dot(c["emb"], m["emb"]))
+                if sim > best_sim:
+                    best, best_sim = m, sim
+            if best is not None and best_sim >= threshold:
+                _absorb(best, c)
+            else:
+                merged.append(c)
+        if len(merged) == len(anchor_ms):
+            break
+        anchor_ms = merged
+    merged = anchor_ms
     for c in floats:
         target = max(merged, key=lambda m: float(np.dot(c["emb"], m["emb"])))
         _absorb(target, c)
@@ -113,7 +120,8 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, tenant: str, task_id
         with tenant_session(db_engine, tenant) as db:
             spk_to_person: dict[int, str] = {}
             for c in clusters:
-                pid = match_or_create(db, session_id, c["emb"], cfg.speaker_threshold)
+                pid = match_or_create(db, session_id, c["emb"], cfg.speaker_threshold,
+                                      c["ms"], cfg.speaker_min_enroll_ms)
                 for spk in c["spks"]:
                     spk_to_person[spk] = pid
             for i, s in enumerate(segments, start=1):

@@ -2,7 +2,9 @@ data_dir: ./data
 model_dir: ./models   # 模型本地目录（不入 git）；缺失时启动自动从 modelscope 下载
 database_url: postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:25432/asr  # docker compose up -d 起库；可用环境变量 ASR_DATABASE_URL 覆盖
 max_workers: 2          # 全局并发转写数（同会话内始终串行）
-speaker_threshold: 0.5  # 认人余弦阈值：偏高会把同一人拆成多个，偏低会把不同人并成一个，拿真实音频验证后再调
+speaker_threshold: 0.45  # 认人余弦阈值（音频内合并与跨录音认人共用）：偏高会把同一人拆成多个，偏低会把不同人并成一个
+speaker_window_threshold: 0.65 # 窗口聚类阈值：偏高拆人、偏低并人；拿真实录音跑 python -m app.diarize_report 看扫描表校准
+speaker_min_enroll_ms: 6000  # 新建说话人的最低素材：不足时不达标只并入最像的已有说话人，避免碎片声纹（调低则更容易建新卡，幽灵声纹变多）
 max_upload_mb: 50
 
 # 租户身份只由 api_key 推导（唯一身份层级，无注册接口）。

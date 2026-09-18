@@ -22,13 +22,40 @@ def test_in_audio_cluster_merge(tmp_path):
     assert spk_sets == [{0, 2, 4}, {1, 3}]
 
 
+def test_in_audio_cluster_merge_needs_second_pass():
+    """A 吸收 C 后质心偏转，才与 B 达标：单趟贪心并不了，收敛循环要能并上。"""
+    import numpy as np
+
+    from app.engine.base import Segment, normalize
+    from app.service import cluster_local_speakers
+
+    def vec(deg):
+        r = np.deg2rad(deg)
+        return normalize(np.array([np.cos(r), np.sin(r)]))
+
+    class AngleEngine:  # 音色向量由片段起点查表决定，角度即"音色"
+        table = {0: 0.0, 10_000: 60.0, 20_000: 25.0}
+
+        def embed(self, wav_path, spans):
+            return vec(self.table[spans[0][0]])
+
+    segments = [
+        Segment(0, 3000, "A", 0),          # 0°，素材最多
+        Segment(10_000, 12_000, "B", 1),   # 60°：对 0° 余弦 0.5 < 0.6，单趟不并
+        Segment(20_000, 21_900, "C", 2),   # 25°：并入 A 后 A 质心偏到约 10°，
+    ]                                      # B 对新质心余弦 0.64 ≥ 0.6，第二趟应并上
+    clusters = cluster_local_speakers(AngleEngine(), "unused.wav", segments, 0.6)
+    assert len(clusters) == 1
+    assert set(clusters[0]["spks"]) == {0, 1, 2}
+
+
 def test_upload_and_transcribe(client):
     sid = register(client)
     tid = upload(client, sid)
     body = wait_done(client, tid)
     assert body["status"] == "done"
     utts = body["utterances"]
-    assert len(utts) == 2  # fake engine: 3 秒音频两个说话人各一句
+    assert len(utts) == 2  # fake engine: 16 秒音频两个说话人各一句
     assert utts[0]["text"]
     assert utts[0]["person_id"] != utts[1]["person_id"]
 

@@ -29,11 +29,15 @@
   .st-failed { background:#fef3f2; color:var(--bad); }
   .utt { padding:6px 0; border-bottom:1px solid #f0f0f0; }
   .utt:last-child { border-bottom:none; }
+  .utt .rec { color:var(--accent); font-size:12px; margin-right:6px; white-space:nowrap; }
+  .utt .rec:empty { display:none; }
   .utt .who { font-weight:600; margin-right:8px; }
   .utt .t { color:var(--muted); font-size:12px; margin-left:8px; }
-  .spk { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 0; border-bottom:1px solid #f0f0f0; }
+  .spk { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 4px; border-bottom:1px solid #f0f0f0; border-radius:6px; }
   .spk:last-child { border-bottom:none; }
-  .spk .nm { font-weight:600; }
+  .spk .nm { font-weight:600; cursor:pointer; }
+  .spk.on { background:#eef4ff; }
+  .spk.on .nm { color:var(--accent); }
   .task { padding:6px 0; border-bottom:1px solid #f0f0f0; }
   .task:last-child { border-bottom:none; }
   .task .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
@@ -78,7 +82,7 @@
       <div id="tasks" class="muted">—</div>
     </section>
     <section>
-      <h2>转写结果 <button id="btnRefresh">刷新</button> <span id="ver" class="muted"></span></h2>
+      <h2>转写结果 <button id="btnRefresh">刷新</button> <span id="ver" class="muted"></span> <span id="filterTag"></span></h2>
       <div id="results" class="muted">—</div>
       <div class="bar" style="margin-top:8px"><button id="btnMore" hidden>加载更多</button></div>
     </section>
@@ -184,6 +188,7 @@ function renderSesMeta() {
 }
 
 async function loadSessions(selectId) {
+  const prevSid = sid();
   const d = await api("/sessions");
   const sel = $("sessions");
   sel.innerHTML = "";
@@ -196,24 +201,59 @@ async function loadSessions(selectId) {
     sel.appendChild(o);
   }
   if (selectId) sel.value = selectId;
+  if (sid() !== prevSid) { filterPerson = null; renderFilterTag(); }
   renderSesMeta();
   await Promise.all([refresh(), loadTasks()]);
 }
 
-let resAfter = 0, resMore = false;
+let resAfter = 0, resMore = false, filterPerson = null;
+const taskSeqById = {};
+
+function renderFilterTag() {
+  const el = $("filterTag");
+  el.textContent = "";
+  if (!filterPerson) return;
+  el.append("筛选：" + filterPerson.name + " ");
+  const x = document.createElement("button");
+  x.textContent = "清除";
+  x.onclick = () => setFilter(null).catch(e => err(e.message));
+  el.appendChild(x);
+}
+
+async function setFilter(p) {
+  filterPerson = p;
+  renderFilterTag();
+  resAfter = 0;
+  await loadResults(true);
+  loadSpeakers().catch(e => err(e.message));
+}
+
 async function loadResults(reset) {
-  const res = await api(`/sessions/${sid()}/results?after=${resAfter}`);
+  let url = `/sessions/${sid()}/results?after=${resAfter}`;
+  if (filterPerson) url += `&person_id=${encodeURIComponent(filterPerson.person_id)}`;
+  const res = await api(url);
   $("ver").textContent = "v" + res.session_version;
+  renderFilterTag();
   const box = $("results");
   if (reset) box.innerHTML = "";
   if (reset && !res.utterances.length) box.textContent = "—";
   for (const u of res.utterances) {
     const div = document.createElement("div");
     div.className = "utt";
-    const t = `${(u.start_ms/1000).toFixed(1)}–${(u.end_ms/1000).toFixed(1)}s`;
-    div.innerHTML = `<span class="who"></span><span class="tx"></span><span class="t">${t}</span>`;
-    div.querySelector(".who").textContent = u.person_name;
-    div.querySelector(".tx").textContent = u.text;
+    const rec = document.createElement("span");
+    rec.className = "rec";
+    const ts = taskSeqById[u.task_id];
+    if (ts != null) rec.textContent = "录音#" + ts;
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = u.person_name;
+    const tx = document.createElement("span");
+    tx.className = "tx";
+    tx.textContent = u.text;
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = `${(u.start_ms/1000).toFixed(1)}–${(u.end_ms/1000).toFixed(1)}s`;
+    div.append(rec, who, tx, t);
     box.appendChild(div);
   }
   box.classList.toggle("muted", reset && !res.utterances.length);
@@ -236,6 +276,11 @@ async function loadSpeakers() {
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = s.display_name || s.auto_label;
+    const isActive = () => filterPerson && filterPerson.person_id === s.person_id;
+    nm.onclick = () =>
+      setFilter(isActive() ? null : { person_id: s.person_id, name: s.display_name || s.auto_label })
+        .catch(e => err(e.message));
+    if (isActive()) row.classList.add("on");
     row.appendChild(nm);
     const meta = document.createElement("span");
     meta.className = "muted";
@@ -299,6 +344,7 @@ async function loadSpeakers() {
 async function loadTasks() {
   if (!sid()) { $("tasks").textContent = "—"; return; }
   const d = await api(`/sessions/${sid()}/tasks`);
+  for (const t of d.tasks) taskSeqById[t.task_id] = t.seq;
   const box = $("tasks");
   box.innerHTML = "";
   box.classList.toggle("muted", !d.tasks.length);
@@ -364,6 +410,7 @@ async function refresh() {
     return;
   }
   resAfter = 0;
+  await loadTasks();  // 先拿任务编号，结果里的"录音#N"标签才有映射
   await Promise.all([loadResults(true), loadSpeakers()]);
 }
 

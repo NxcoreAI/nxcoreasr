@@ -10,7 +10,7 @@ import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .db import LabelAudit, Person, SessionRecord, Utterance, now_iso
+from .db import LabelAudit, Person, SessionRecord, Task, Utterance, now_iso
 from .engine.base import normalize
 
 
@@ -63,8 +63,17 @@ def name_map(db: Session, session_id: str) -> dict[str, dict]:
     return out
 
 
-def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: float) -> str:
-    """与会话内各根人的质心比余弦；达标归入并滑动更新质心，否则新建。
+GRAY_MARGIN = 0.10  # 擦边区宽度：最佳相似度落在 [阈值-0.10, 阈值) 时只挂靠不建卡。
+                     # 真实远场音频里同人跨录音相似度常落在这个区间，直接新建会随录音数累积幽灵
+
+
+def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: float,
+                    ms: float, min_enroll_ms: float) -> str:
+    """与会话内各根人的质心比余弦；达标归入并滑动更新质心。
+
+    三段式：达标 → 归入并更新质心；擦边（差 0.10 以内）或素材不足 →
+    只挂最像的已有根人（不新建也不动质心，避免挂错向量污染质心）；
+    明显不像且素材充足才是真正的新说话人。空库保底新建（首段音频锚点）。
 
     centroid 存的是各成员向量的真实均值（未归一化），比较时归一，
     这样滑动更新 (均值*n + 新向量)/(n+1) 才是精确的。"""
@@ -83,6 +92,8 @@ def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: fl
         centroid = (np.frombuffer(best.centroid, dtype=np.float32) * n + emb) / (n + 1)
         best.centroid = np.asarray(centroid, dtype=np.float32).tobytes()
         best.embed_count = n + 1
+        return best.id
+    if best is not None and (ms < min_enroll_ms or best_sim >= threshold - GRAY_MARGIN):
         return best.id
     root_count = sum(1 for p in persons.values() if not p.merged_into)
     pid = _new_person_id()
@@ -195,3 +206,36 @@ def list_speakers(db: Session, session_id: str) -> list[dict]:
         })
     out.sort(key=lambda x: x["auto_label"])
     return out
+
+
+def speaker_tasks(db: Session, session_id: str, person_id: str) -> dict:
+    """某说话人出现过的录音列表：按根人归拢，带每次录音内的话句数与说话时长。"""
+    persons = load_persons(db, session_id)
+    if person_id not in persons:
+        raise SpeakerError(404, "说话人不存在")
+    root = resolve_root(persons, person_id)
+    pids = [q.id for q in persons.values() if resolve_root(persons, q.id).id == root.id]
+    rows = db.execute(
+        select(Utterance.task_id, func.count(),
+               func.sum(Utterance.end_ms - Utterance.start_ms))
+        .where(Utterance.session_id == session_id, Utterance.person_id.in_(pids))
+        .group_by(Utterance.task_id)
+    ).all()
+    task_ids = [r[0] for r in rows]
+    tasks = ({t.id: t for t in db.scalars(
+        select(Task).where(Task.id.in_(task_ids))).all()} if task_ids else {})
+    items = []
+    for tid, cnt, spoken in rows:
+        t = tasks.get(tid)
+        items.append({
+            "task_id": tid,
+            "seq": t.seq if t else None,
+            "duration_ms": t.duration_ms if t else None,
+            "created_at": t.created_at if t else None,
+            "done_at": t.done_at if t else None,
+            "utterance_count": cnt,
+            "spoken_ms": int(spoken or 0),
+        })
+    items.sort(key=lambda x: (x["seq"] is None, x["seq"], x["task_id"]))
+    return {"person_id": root.id, "person_name": display_name_of(root),
+            "named": root.display_name is not None, "tasks": items}

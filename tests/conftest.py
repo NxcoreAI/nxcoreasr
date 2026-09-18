@@ -68,8 +68,9 @@ def auth(key=KEY_A):
     return {"Authorization": f"Bearer {key}"}
 
 
-def make_wav(seconds: float = 3.0, rate: int = 16000) -> bytes:
-    """静音 PCM16 wav（fake engine 只看时长）。"""
+def make_wav(seconds: float = 16.0, rate: int = 16000) -> bytes:
+    """静音 PCM16 wav（fake engine 只看时长）；默认 16s 使每个假说话人
+    素材 8s，过 speaker_min_enroll_ms 门槛正常建卡。"""
     buf = io.BytesIO()
     n = int(seconds * rate)
     with wave.open(buf, "wb") as w:

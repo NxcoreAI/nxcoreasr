@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>说话人面板 · nxcore-asr</title>
+<style>
+  :root { --line:#e2e2e2; --muted:#777; --accent:#1a56db; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; color:#1b1b1b; background:#fafafa; }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:12px 20px; background:#fff; border-bottom:1px solid var(--line); }
+  header .title { font-weight:600; margin-right:8px; }
+  input, select, button { font:inherit; padding:5px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  button { cursor:pointer; }
+  main { display:grid; grid-template-columns:240px 280px 1fr; gap:16px; padding:16px 20px; max-width:1280px; }
+  @media (max-width:900px) { main { grid-template-columns:1fr; } }
+  .col { background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 14px; min-height:300px; }
+  h2 { font-size:14px; margin:0 0 6px; display:flex; align-items:center; gap:8px; }
+  h2 .muted { font-weight:400; }
+  .muted { color:var(--muted); font-size:12px; }
+  .item { padding:6px 8px; border-radius:6px; cursor:pointer; }
+  .item:hover { background:#f5f7fa; }
+  .item.on { background:#eef4ff; }
+  .item.on .nm { color:var(--accent); }
+  .item .nm { font-weight:600; }
+  .item .meta { color:var(--muted); font-size:12px; }
+  .item pre { white-space:pre-wrap; }
+  .utt { padding:6px 0; border-bottom:1px solid #f0f0f0; }
+  .utt:last-child { border-bottom:none; }
+  .utt .t { color:var(--muted); font-size:12px; margin-right:8px; white-space:nowrap; }
+  #err { color:#b42318; font-size:13px; padding:0 20px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">说话人面板</span>
+  <input id="key" placeholder="API Key" size="22">
+  <select id="sessions"></select>
+  <button id="btnRefresh">刷新</button>
+</header>
+<div id="err"></div>
+<main>
+  <div class="col">
+    <h2>说话人 <span id="spkCount" class="muted"></span></h2>
+    <div id="speakers" class="muted">—</div>
+  </div>
+  <div class="col">
+    <h2>录音 <span id="curPerson" class="muted"></span></h2>
+    <div id="tasks" class="muted">—</div>
+  </div>
+  <div class="col">
+    <h2>段落 <span id="curTask" class="muted"></span></h2>
+    <div id="utts" class="muted">—</div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const err = m => { $("err").textContent = m || ""; };
+
+$("key").value = localStorage.getItem("asr_key") || "";
+$("key").addEventListener("change", () => {
+  localStorage.setItem("asr_key", $("key").value.trim());
+  init();
+});
+
+async function api(path) {
+  const r = await fetch("/v1" + path, { headers: { Authorization: "Bearer " + $("key").value.trim() } });
+  if (!r.ok) {
+    let d = ""; try { d = (await r.json()).detail; } catch {}
+    throw new Error(`${r.status} ${d || r.statusText}`);
+  }
+  return r.json();
+}
+
+const sid = () => $("sessions").value;
+let cur = { person: null, task: null };  // {id, name} / {id, seq}
+
+const sec = ms => ms == null ? "—" : (ms / 1000).toFixed(1) + "s";
+const hhmm = iso => (iso || "").slice(11, 19);
+
+function empty(el) {
+  el.classList.add("muted");
+  el.textContent = "—";
+}
+
+async function loadSessions() {
+  const d = await api("/sessions");
+  const sel = $("sessions");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  for (const s of d.sessions) {
+    const o = document.createElement("option");
+    o.value = s.session_id;
+    o.textContent = `${s.external_id}（${s.done_count}/${s.audio_count}）`;
+    sel.appendChild(o);
+  }
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  if (sel.value !== prev) { cur = { person: null, task: null }; }
+}
+
+async function loadSpeakers() {
+  const box = $("speakers");
+  if (!sid()) { empty(box); $("spkCount").textContent = ""; return; }
+  const d = await api(`/sessions/${sid()}/speakers`);
+  box.innerHTML = "";
+  box.classList.toggle("muted", !d.speakers.length);
+  if (!d.speakers.length) box.textContent = "—";
+  $("spkCount").textContent = d.speakers.length || "";
+  for (const s of d.speakers) {
+    const div = document.createElement("div");
+    div.className = "item";
+    if (cur.person && cur.person.id === s.person_id) div.classList.add("on");
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = s.display_name || s.auto_label;
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = `　${s.utterance_count} 句 · ${s.audio_count} 段`;
+    div.append(nm, meta);
+    div.onclick = () => {
+      if (cur.person && cur.person.id === s.person_id) return;
+      cur = { person: { id: s.person_id, name: s.display_name || s.auto_label }, task: null };
+      renderTaskHead();
+      loadTasks().catch(e => err(e.message));
+      loadSpeakers().catch(e => err(e.message));
+    };
+    box.appendChild(div);
+  }
+}
+
+function renderTaskHead() {
+  $("curPerson").textContent = cur.person ? "· " + cur.person.name : "";
+}
+
+async function loadTasks() {
+  const box = $("tasks");
+  empty(box);
+  $("curTask").textContent = "";
+  empty($("utts"));
+  if (!cur.person) return;
+  const d = await api(`/sessions/${sid()}/speakers/${cur.person.id}/tasks`);
+  if (d.person_id !== cur.person.id) cur.person.id = d.person_id;  // 传旧编号时归拢到根
+  cur.person.name = d.person_name;
+  renderTaskHead();
+  box.innerHTML = "";
+  box.classList.toggle("muted", !d.tasks.length);
+  if (!d.tasks.length) box.textContent = "—";
+  for (const t of d.tasks) {
+    const div = document.createElement("div");
+    div.className = "item";
+    if (cur.task && cur.task.id === t.task_id) div.classList.add("on");
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = t.seq == null ? "未编号" : "录音#" + t.seq;
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    const time = hhmm(t.done_at || t.created_at);
+    meta.textContent = `　${time} · ${t.utterance_count} 句 · 说 ${sec(t.spoken_ms)}`;
+    div.append(nm, meta);
+    div.onclick = () => {
+      if (cur.task && cur.task.id === t.task_id) return;
+      cur.task = { id: t.task_id, seq: t.seq };
+      loadTasks().catch(e => err(e.message));
+      loadUtts().catch(e => err(e.message));
+    };
+    box.appendChild(div);
+  }
+}
+
+async function loadUtts() {
+  const box = $("utts");
+  empty(box);
+  $("curTask").textContent = "";
+  if (!cur.task) return;
+  const d = await api(`/tasks/${cur.task.id}`);
+  $("curTask").textContent = "· " + (cur.task.seq == null ? d.task_id : "录音#" + cur.task.seq);
+  const mine = (d.utterances || []).filter(u => u.person_id === cur.person.id);
+  box.innerHTML = "";
+  box.classList.toggle("muted", !mine.length);
+  if (!mine.length) box.textContent = "—";
+  for (const u of mine) {
+    const div = document.createElement("div");
+    div.className = "utt";
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = `${(u.start_ms/1000).toFixed(1)}–${(u.end_ms/1000).toFixed(1)}s`;
+    const tx = document.createElement("span");
+    tx.textContent = u.text;
+    div.append(t, tx);
+    box.appendChild(div);
+  }
+}
+
+async function init() {
+  err("");
+  try {
+    await loadSessions();
+    renderTaskHead();
+    await Promise.all([loadSpeakers(), loadTasks()]);
+  } catch (e) { err(e.message); }
+}
+
+$("sessions").addEventListener("change", () => {
+  cur = { person: null, task: null };
+  init();
+});
+$("btnRefresh").onclick = () => init();
+
+(async () => { if ($("key").value) init(); })();
+</script>
+</body>
+</html>
