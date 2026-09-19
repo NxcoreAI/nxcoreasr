@@ -1,10 +1,13 @@
 data_dir: ./data
 model_dir: ./models   # 模型本地目录（不入 git）；缺失时启动自动从 modelscope 下载
 database_url: postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:25432/asr  # docker compose up -d 起库；可用环境变量 ASR_DATABASE_URL 覆盖
-engine: funasr         # funasr（默认，纯 torch）| llamacpp（GGUF 量化混合引擎，CPU 提速、内存省约 8 成；需先备好二进制与 GGUF，见 README）
-llamacpp_bin: ""       # engine=llamacpp 必填：llama-funasr-cli 路径（需带 --dump-enc 落盘补丁的自编译版本，否则无逐字时间戳）
-llamacpp_dir: ""       # engine=llamacpp 必填：GGUF 目录（funasr-encoder-f16.gguf、fsmn-vad.gguf 及下方 LLM 量化文件）
-llamacpp_llm: qwen3-0.6b-q4km.gguf  # 老至强 x86 用 q4km（q8 更慢）；Apple 芯片 q8 与 q4 同速，可用 q8_0 文本质量更稳
+# 转写引擎：llamacpp（默认，GGUF 量化混合引擎，CPU 提速内存省约 8 成）
+# 或 funasr（纯 torch 慢但零准备）。llamacpp 需先跑：bash scripts/setup_llamacpp.sh
+# （下载约 1.7G 量化模型 + 编译补丁版二进制，装到 models/llamacpp/，跑一次即可）
+# 下面三项不填即用脚本默认位置；量化档也按 CPU 架构自动选（x86 用 q4km，Apple 芯片用 q8_0）
+# llamacpp_bin: models/llamacpp/bin/llama-funasr-cli
+# llamacpp_dir: models/llamacpp/gguf
+# llamacpp_llm: qwen3-0.6b-q4km.gguf
 max_workers: 2          # 全局并发转写数（同会话内始终串行）
 llm_quantize: false     # 转写模型 LLM 分支 int8 动态量化：省内存、CPU 提速；逐字时间戳走 CTC 分支不受影响，改后建议跑 diarize_report 校准一次
 speaker_threshold: 0.45  # 认人余弦阈值（音频内合并与跨录音认人共用）：偏高会把同一人拆成多个，偏低会把不同人并成一个

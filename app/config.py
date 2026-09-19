@@ -22,10 +22,10 @@ DEFAULT_DATABASE_URL = "postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:
 @dataclass
 class AppConfig:
     data_dir: Path
-    engine: str = "funasr"
+    engine: str = "llamacpp"
     llamacpp_bin: str = ""
     llamacpp_dir: str = ""
-    llamacpp_llm: str = "qwen3-0.6b-q4km.gguf"
+    llamacpp_llm: str = ""
     model_dir: Path = Path("./models")
     max_workers: int = 2
     llm_quantize: bool = False
@@ -73,13 +73,24 @@ def load_config(path: str | None = None) -> AppConfig:
         raise ValueError("租户 api_key 重复")
     for t in tenants:
         _validate_tenant(t)
+    model_dir = Path(raw.get("model_dir", "./models")).resolve()
+    # 引擎资产默认放在 model_dir/llamacpp/ 下（scripts/setup_llamacpp.sh 的产出）
+    lc = model_dir / "llamacpp"
+    bin_default = str(lc / "bin" / "llama-funasr-cli")
+    dir_default = str(lc / "gguf")
+    import platform
+
+    # 老至强 x86 上 q4 明显快于 q8；Apple 芯片两者同速、q8 文本更准
+    llm_default = ("qwen3-0.6b-q4km.gguf"
+                   if platform.machine() in ("x86_64", "AMD64")
+                   else "qwen3-0.6b-q8_0.gguf")
     return AppConfig(
         data_dir=Path(raw.get("data_dir", "./data")).resolve(),
-        engine=str(raw.get("engine", "funasr")),
-        llamacpp_bin=str(raw.get("llamacpp_bin", "")),
-        llamacpp_dir=str(raw.get("llamacpp_dir", "")),
-        llamacpp_llm=str(raw.get("llamacpp_llm", "qwen3-0.6b-q4km.gguf")),
-        model_dir=Path(raw.get("model_dir", "./models")).resolve(),
+        model_dir=model_dir,
+        engine=str(raw.get("engine", "llamacpp")),
+        llamacpp_bin=str(raw.get("llamacpp_bin", bin_default)),
+        llamacpp_dir=str(raw.get("llamacpp_dir", dir_default)),
+        llamacpp_llm=str(raw.get("llamacpp_llm", llm_default)),
         max_workers=int(raw.get("max_workers", 2)),
         llm_quantize=bool(raw.get("llm_quantize", False)),
         speaker_threshold=float(raw.get("speaker_threshold", 0.45)),

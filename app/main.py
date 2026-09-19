@@ -49,8 +49,17 @@ def _build_engine_(cfg):
         from .engine.fake_engine import FakeEngine
         return FakeEngine()
     if cfg.engine == "llamacpp":
-        if not (cfg.llamacpp_bin and cfg.llamacpp_dir):
-            raise ValueError("engine=llamacpp 需要同时配置 llamacpp_bin 和 llamacpp_dir")
+        from pathlib import Path
+        missing = [p for p in (cfg.llamacpp_bin,
+                               f"{cfg.llamacpp_dir}/funasr-encoder-f16.gguf",
+                               f"{cfg.llamacpp_dir}/fsmn-vad.gguf",
+                               f"{cfg.llamacpp_dir}/{cfg.llamacpp_llm}")
+                   if not Path(p).exists()]
+        if missing:
+            raise ValueError(
+                "engine=llamacpp 缺少文件：\n  " + "\n  ".join(missing)
+                + "\n先运行 bash scripts/setup_llamacpp.sh（下载约 1.7G 模型并编译，"
+                "或改 engine: funasr 用纯 torch 方案）")
         from .engine.llamacpp_engine import LlamaCppEngine
         return LlamaCppEngine(cfg.model_dir, cfg.llamacpp_bin, cfg.llamacpp_dir,
                               cfg.llamacpp_llm, cfg.speaker_window_threshold)
