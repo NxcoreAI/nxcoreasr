@@ -34,10 +34,9 @@ from .db import (
 from .models import CreateJobReq, MergeReq, NameReq, RegisterSessionReq
 from .queueing import Scheduler
 from .speakers import SpeakerError
+from .storage import AliyunOssStorage, LocalObjectStorage, ObjectNotFound
 
 log = logging.getLogger(__name__)
-
-UPLOAD_TOKEN_TTL = 600  # 上传授权 URL 有效期（秒）
 
 
 def _new_id(prefix: str) -> str:
@@ -77,7 +76,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.db_engine = build_engine(cfg)
         init_db(app.state.db_engine)
         app.state.engine = _build_engine_(cfg)
-        app.state.scheduler = Scheduler(cfg, app.state.engine, app.state.db_engine)
+        app.state.storage = AliyunOssStorage(cfg) if cfg.oss else LocalObjectStorage(cfg)
+        app.state.scheduler = Scheduler(cfg, app.state.engine, app.state.db_engine,
+                                        app.state.storage)
         app.state.scheduler.start()
         yield
         app.state.scheduler.stop()
@@ -175,7 +176,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 db.execute(delete(model).where(model.session_id == sid))
             db.execute(delete(SessionRecord).where(SessionRecord.id == sid))
         for p in paths:
-            Path(p).unlink(missing_ok=True)
+            request.app.state.storage.delete(p)
         log.info("会话已删除 tenant=%s session=%s", tenant, sid)
         return {"deleted": True}
 
@@ -223,17 +224,21 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.post("/v1/asr-jobs/{jid}/upload-authorization")
     def upload_authorization(jid: str, request: Request,
                              tenant: str = Depends(require_tenant)):
+        storage = request.app.state.storage
         with tenant_session(request.app.state.db_engine, tenant) as db:
             task = _get_job(db, jid)
             if task.status not in ("pending_upload", "uploaded"):
                 raise HTTPException(409, "任务已进入转写流程，不能再上传")
             token = secrets.token_urlsafe(32)
-            expires = datetime.now(timezone.utc) + timedelta(seconds=UPLOAD_TOKEN_TTL)
+            expires = datetime.now(timezone.utc) + timedelta(seconds=storage.upload_ttl)
             task.upload_token = token
             task.upload_expires_at = expires.isoformat(timespec="microseconds")
-        url = str(request.base_url).rstrip("/") + "/v1/uploads/" + token
-        return {"job_id": jid, "upload_url": url, "method": "PUT",
-                "expires_at": task.upload_expires_at}
+        # OSS 模式 key 含随机 token：重新授权天然换 key，旧对象成孤儿靠前缀生命周期清
+        key = f"nxcore/{tenant}/{jid}/{token}"
+        target = storage.upload_target(key, token, storage.upload_ttl,
+                                       str(request.base_url).rstrip("/"))
+        return {"job_id": jid, "upload_url": target.url, "method": "PUT",
+                "headers": target.headers, "expires_at": task.upload_expires_at}
 
     @app.put("/v1/uploads/{token}")
     async def put_upload(token: str, request: Request,
@@ -272,10 +277,27 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.post("/v1/asr-jobs/{jid}/upload-complete")
     def upload_complete(jid: str, request: Request, tenant: str = Depends(require_tenant)):
+        storage = request.app.state.storage
+        cfg = request.app.state.config
         with tenant_session(request.app.state.db_engine, tenant) as db:
             task = _get_job(db, jid)
             if task.status == "pending_upload":
-                raise HTTPException(409, "尚未上传音频")
+                if not storage.direct:
+                    raise HTTPException(409, "尚未上传音频")
+                # OSS 直传：字节没经过本服务，complete 时才核对对象
+                key = f"nxcore/{tenant}/{task.id}/{task.upload_token}"
+                try:
+                    size = storage.head_size(key)
+                except ObjectNotFound:
+                    raise HTTPException(409, "尚未上传音频")
+                limit = cfg.max_upload_mb * 1024 * 1024
+                if size == 0:
+                    raise HTTPException(400, "空文件")
+                if size > limit:
+                    storage.delete(key)
+                    raise HTTPException(413, f"音频超过 {cfg.max_upload_mb}MB 上限")
+                task.status = "uploaded"
+                task.audio_path = key
             if task.status != "uploaded":
                 return {"job_id": jid, "session_id": task.session_id,
                         "status": task.status, "queued": False}
@@ -372,7 +394,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 raise HTTPException(404, "任务不存在")
             if task.status != "failed":
                 raise HTTPException(409, "仅失败任务可重试")
-            if not task.audio_path or not Path(task.audio_path).exists():
+            if not task.audio_path or not request.app.state.storage.exists(task.audio_path):
                 raise HTTPException(409, "原始音频已不存在，请重新上传")
             task.status = "queued"
             task.error = None

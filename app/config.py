@@ -16,6 +16,17 @@ class Tenant:
     api_key: str
 
 
+@dataclass
+class OssConfig:
+    """阿里云 OSS：四项核心齐备才启用，否则本地盘回退。"""
+
+    endpoint: str
+    bucket: str
+    access_key_id: str
+    access_key_secret: str
+    upload_ttl_seconds: int = 600
+
+
 DEFAULT_DATABASE_URL = "postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:25432/asr"
 
 
@@ -34,6 +45,7 @@ class AppConfig:
     speaker_min_enroll_ms: int = 6000
     max_upload_mb: int = 50
     database_url: str = DEFAULT_DATABASE_URL
+    oss: OssConfig | None = None
     tenants: list[Tenant] = field(default_factory=list)
 
     def tenant_by_key(self, api_key: str) -> Tenant | None:
@@ -84,6 +96,18 @@ def load_config(path: str | None = None) -> AppConfig:
     llm_default = ("qwen3-0.6b-q4km.gguf"
                    if platform.machine() in ("x86_64", "AMD64")
                    else "qwen3-0.6b-q8_0.gguf")
+    oss_raw = raw.get("oss") or {}
+    oss = OssConfig(
+        endpoint=os.environ.get("ASR_OSS_ENDPOINT") or str(oss_raw.get("endpoint", "")),
+        bucket=os.environ.get("ASR_OSS_BUCKET") or str(oss_raw.get("bucket", "")),
+        access_key_id=os.environ.get("ASR_OSS_ACCESS_KEY_ID") or str(oss_raw.get("access_key_id", "")),
+        access_key_secret=(os.environ.get("ASR_OSS_ACCESS_KEY_SECRET")
+                           or str(oss_raw.get("access_key_secret", ""))),
+        upload_ttl_seconds=int(os.environ.get("ASR_OSS_UPLOAD_TTL_SECONDS")
+                               or oss_raw.get("upload_ttl_seconds", 600)),
+    )
+    if not all((oss.endpoint, oss.bucket, oss.access_key_id, oss.access_key_secret)):
+        oss = None
     return AppConfig(
         data_dir=Path(raw.get("data_dir", "./data")).resolve(),
         model_dir=model_dir,
@@ -99,5 +123,6 @@ def load_config(path: str | None = None) -> AppConfig:
         max_upload_mb=int(raw.get("max_upload_mb", 50)),
         database_url=os.environ.get("ASR_DATABASE_URL")
         or str(raw.get("database_url", DEFAULT_DATABASE_URL)),
+        oss=oss,
         tenants=tenants,
     )

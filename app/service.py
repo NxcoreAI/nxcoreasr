@@ -89,7 +89,8 @@ def _absorb(target: dict, frag: dict) -> None:
     target["spks"].extend(frag["spks"])
 
 
-def process_task(cfg: AppConfig, engine: Engine, db_engine, tenant: str, task_id: str) -> None:
+def process_task(cfg: AppConfig, engine: Engine, db_engine, storage, tenant: str,
+                 task_id: str) -> None:
     with tenant_session(db_engine, tenant) as db:
         task = db.get(Task, task_id)
         if task is None or task.status != "queued":
@@ -99,8 +100,10 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, tenant: str, task_id
             return  # 会话已在删除中，删除流程会清掉任务
         task.status = "processing"
         session_id = task.session_id
-        src = task.audio_path
+        key = task.audio_path
 
+    src = storage.materialize(key)  # OSS：先下到本地临时；本地盘：原路径
+    downloaded = src != key
     wav = src + ".16k.wav"
     started = time.monotonic()
     try:
@@ -138,7 +141,11 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, tenant: str, task_id
             db.execute(update(SessionRecord)
                        .where(SessionRecord.id == session_id)
                        .values(last_active_at=now_iso()))
-        Path(src).unlink(missing_ok=True)  # 转写成功即删原始音频
+        # 转写成功即删原始音频；失败保留供 retry（本地下载件统一在 finally 清）
+        if downloaded:
+            storage.delete(key)
+        else:
+            Path(src).unlink(missing_ok=True)
         speech_ms = sum(s.end_ms - s.start_ms for s in segments)
         speech_pct = speech_ms * 100 // record_ms if record_ms else 0
         log.info("任务完成 tenant=%s task=%s 耗时=%dms 句数=%d 录音=%.1fs 语音=%.1fs(%d%%) 转码=%dms 转写=%dms",
@@ -156,3 +163,5 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, tenant: str, task_id
         log.warning("任务失败 tenant=%s task=%s err=%s", tenant, task_id, str(e)[:200])
     finally:
         Path(wav).unlink(missing_ok=True)
+        if downloaded:
+            Path(src).unlink(missing_ok=True)

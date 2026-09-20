@@ -20,10 +20,11 @@ SessionKey = tuple[str, str]  # (tenant, session_id)
 
 
 class Scheduler:
-    def __init__(self, cfg: AppConfig, engine: Engine, db_engine):
+    def __init__(self, cfg: AppConfig, engine: Engine, db_engine, storage):
         self.cfg = cfg
         self.engine = engine
         self.db_engine = db_engine
+        self.storage = storage
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._pending: dict[SessionKey, deque[str]] = {}
@@ -108,7 +109,8 @@ class Scheduler:
             key, task_id = item
             tenant, _session_id = key
             try:
-                service.process_task(self.cfg, self.engine, self.db_engine, tenant, task_id)
+                service.process_task(self.cfg, self.engine, self.db_engine,
+                                     self.storage, tenant, task_id)
             except Exception:
                 log.exception("worker 异常 tenant=%s task=%s", tenant, task_id)
             finally:

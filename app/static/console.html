@@ -148,7 +148,9 @@ function logCall(method, path, status, ms) {
 }
 
 async function http(url, opts = {}) {
-  opts.headers = Object.assign({ "Authorization": "Bearer " + $("key").value.trim() }, opts.headers || {});
+  // 预签名直传地址自带鉴权，附加 Authorization 反而毁掉签名
+  if (!/^https?:\/\//.test(url))
+    opts.headers = Object.assign({ "Authorization": "Bearer " + $("key").value.trim() }, opts.headers || {});
   const t0 = performance.now();
   const r = await fetch(url, opts);
   logCall(opts.method || "GET", url.replace(location.origin, ""), r.status,
@@ -473,7 +475,7 @@ async function uploadBlob(blob, targetSid) {
     const authz = await jpost(`/asr-jobs/${job.job_id}/upload-authorization`, {});
     const r = await http(authz.upload_url, {
       method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
+      headers: Object.assign({ "Content-Type": "application/octet-stream" }, authz.headers || {}),
       body: blob,
     });
     if (!r.ok) throw new Error(`直传失败 ${r.status}`);

@@ -15,6 +15,20 @@ speaker_window_threshold: 0.65 # 窗口聚类阈值：偏高拆人、偏低并�
 speaker_min_enroll_ms: 6000  # 新建说话人的最低素材：不足时不达标只并入最像的已有说话人，避免碎片声纹（调低则更容易建新卡，幽灵声纹变多）
 max_upload_mb: 50
 
+# 对象存储：不配此段则音频落本地磁盘（data/{租户}/tmp）；配上则走阿里云 OSS
+# 直传（上传地址是 OSS 预签名 URL，字节不经本服务）。桶复用 SaaS 的
+# everroom，对象落 nxcore/ 前缀，与桶内 asr-staging/、audio/ 互不干扰。
+# 四项齐备才启用；可用环境变量 ASR_OSS_ENDPOINT / ASR_OSS_BUCKET /
+# ASR_OSS_ACCESS_KEY_ID / ASR_OSS_ACCESS_KEY_SECRET / ASR_OSS_UPLOAD_TTL_SECONDS 覆盖。
+# ⚠ 桶里有长期备份（audio/ 前缀），清理规则只允许配在 nxcore/ 前缀上
+#   （如 7 天过期），严禁配桶级生命周期。
+# oss:
+#   endpoint: https://oss-cn-beijing.aliyuncs.com
+#   bucket: everroom
+#   access_key_id: <与 SaaS 侧一致的 AK>
+#   access_key_secret: <与 SaaS 侧一致的 SK>
+#   upload_ttl_seconds: 600
+
 # 租户身份只由 api_key 推导（唯一身份层级，无注册接口）。
 # 启动校验会拒绝占位符和短 key：用 openssl rand -hex 32 生成后填入。
 tenants:

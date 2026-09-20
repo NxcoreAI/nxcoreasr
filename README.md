@@ -14,7 +14,7 @@
 - **llama.cpp 引擎（默认）**：GGUF 量化混合引擎——C++ 侧跑 VAD + 音频编码器 + LLM 解码（量化权重），Python 侧只保留 CTC 分支强制对齐补回逐字时间戳并复用同一套说话人分离管线。老至强服务器实测同条件快约 3 成、内存峰值从 6.9G 降到 1.3G。所需二进制（带 `--dump-enc` 落盘补丁的自编译版）与 GGUF 用 `scripts/setup_llamacpp.sh` 一键获取（补丁源码在 `llamacpp/funasr-cli.cpp`）；换回纯 torch 方案改 `engine: funasr`。
 - **认人**：cam++ 滑动窗口音色向量在单条音频内做平均链接聚类（阈值 `speaker_window_threshold`），结合 Fun-ASR-Nano 的逐字时间戳把每个字归到说话人、在切换点切分文本；音频内先按聚合音色合并碎编号，跨音频再与会话内各人质心比余弦，≥ `speaker_threshold` 归入并滑动更新质心，差 0.10 以内只挂靠不建卡（防幽灵声纹随录音数累积），明显不像才新建"说话人N"。亚秒级碎片只并入不新建人。阈值校准：拿真实录音跑 `python -m app.diarize_report <wav>` 看扫描表。
 - **标签**：文本只存稳定 `person_id`，显示名读取时翻译——命名/合并后历史结果自动联动。每次标签变更会话 `version` +1，调用方发现版本变了就重拉。
-- **音频**：转写成功即删原始音频；失败保留供 `retry`。日志不打转写文本与人名。
+- **音频**：对象存储双后端——不配 `oss` 段时音频落本地磁盘（`data/{租户}/tmp`），配了走阿里云 OSS 预签名直传（对象落 `nxcore/` 前缀，桶复用 SaaS 的 everroom；**清理规则只能配在 `nxcore/` 前缀上**，如 7 天过期，桶内 `audio/` 是长期备份，严禁桶级生命周期）。转写成功即删原始音频；失败保留供 `retry`；孤儿对象（授权后从未 complete）靠前缀生命周期兜底。日志不打转写文本与人名。
 
 ## 启动
 
@@ -25,6 +25,9 @@ python3.12 -m venv .venv
 bash scripts/setup_llamacpp.sh  # 下载量化模型(约1.7G)+编译转写二进制，装到 models/llamacpp/，跑一次即可（10-30 分钟）
 # 编辑 config.yaml：用 openssl rand -hex 32 生成随机 api_key 填入两个租户
 # （占位符 CHANGE_ME 和短 key 会被启动校验直接拒绝）
+# 需要对象存储时在 config.yaml 加 oss 段（见 config.example.yaml；需 pip install oss2）。
+# ⚠ 从本地盘模式切到 OSS 前，先等队列清空：存量任务的 audio_path 是本地路径，
+#   切换后不兼容（新任务存的是 OSS 对象 key）。
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8300
 ```
 
@@ -49,8 +52,8 @@ Base：`/v1`，全部需要 `Authorization: Bearer <api_key>`（health 也包括
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/asr-jobs` | 建转写任务，`{"external_id": "..."}`，按 external_id 幂等 get-or-create 会话；可带 `Idempotency-Key` 头（同会话同 key 返回已有 job，响应含当前 status） |
-| POST | `/asr-jobs/{jid}/upload-authorization` | 换取直传地址，10 分钟有效；重新授权即作废旧地址 |
-| PUT | `/uploads/{token}` | 直传音频裸字节（非 multipart）；complete 前可重复 PUT 覆盖；URL 由请求 Host 拼出，反代场景需保证 Host 头正确 |
+| POST | `/asr-jobs/{jid}/upload-authorization` | 换取直传地址（默认 10 分钟有效）；重新授权即作废旧地址。本地盘模式返回指向本服务的 `/uploads/{token}`；配了 `oss` 段返回阿里云 OSS 预签名绝对地址（响应含 `headers`，PUT 时须原样携带，且不能再附加 Authorization） |
+| PUT | `/uploads/{token}` | 直传音频裸字节（非 multipart）；complete 前可重复 PUT 覆盖；**仅本地盘模式存在**，URL 由请求 Host 拼出，反代场景需保证 Host 头正确。OSS 模式字节直达对象存储 |
 | POST | `/asr-jobs/{jid}/upload-complete` | 确认上传并触发转写（分配 seq、入队）；对已入队/已完成的 job 幂等返回现状 |
 | GET | `/asr-jobs/{jid}` | 轮询任务，与 `GET /tasks/{tid}` 响应完全相同（job_id 即 task_id） |
 | POST | `/sessions` | 注册会话，`{"external_id": "..."}`，幂等（asr-jobs 的显式等价通道） |
