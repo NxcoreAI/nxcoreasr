@@ -39,9 +39,13 @@ def transcode(src: str, dst: str) -> None:
         raise AudioError(f"音频无法解码: {proc.stderr.strip()[:200]}")
 
 
-def cluster_local_speakers(engine: Engine, wav: str, segments, threshold: float) -> list[dict]:
+def cluster_local_speakers(embed_fn, segments, threshold: float) -> list[dict]:
     """音频内先聚类：FunASR 的 spk 编号在长音频里会把同一人拆成多个编号，
-    先用音色向量在本音频内合并；短碎片段只并入已有簇，绝不独立成新说话人。"""
+    先用音色向量在本音频内合并；短碎片段只并入已有簇，绝不独立成新说话人。
+
+    embed_fn(spans) -> 归一化音色向量；线上传 engine 的封装，
+    diarize_eval 重放时传缓存（换阈值不重跑 cam++）。
+    """
     spans_by_spk: dict[int, list[tuple[int, int]]] = {}
     for s in segments:
         spans_by_spk.setdefault(s.local_spk, []).append((s.start_ms, s.end_ms))
@@ -51,7 +55,7 @@ def cluster_local_speakers(engine: Engine, wav: str, segments, threshold: float)
     clusters = []
     for spk, spans in spans_by_spk.items():
         ms = sum(e - b for b, e in spans)
-        clusters.append({"emb": engine.embed(wav, spans), "ms": ms, "spks": [spk]})
+        clusters.append({"emb": embed_fn(spans), "ms": ms, "spks": [spk]})
     clusters.sort(key=lambda c: c["ms"], reverse=True)  # 素材多的先定簇，质心更稳
 
     min_ms = MIN_NEW_SPEAKER_SECONDS * 1000
@@ -124,7 +128,8 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, storage, tenant: str
         segments.sort(key=lambda s: s.start_ms)
 
         # 音频内聚类合并 FunASR 的碎编号，再与会话说话人库对齐
-        clusters = cluster_local_speakers(engine, wav, segments, cfg.speaker_threshold)
+        clusters = cluster_local_speakers(
+            lambda spans: engine.embed(wav, spans), segments, cfg.speaker_threshold)
 
         with tenant_session(db_engine, tenant) as db:
             spk_to_person: dict[int, str] = {}

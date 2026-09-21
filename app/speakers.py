@@ -67,38 +67,57 @@ GRAY_MARGIN = 0.10  # 擦边区宽度：最佳相似度落在 [阈值-0.10, 阈�
                      # 真实远场音频里同人跨录音相似度常落在这个区间，直接新建会随录音数累积幽灵
 
 
+def match_decision(centroids: list[tuple[np.ndarray, int]], emb: np.ndarray,
+                   threshold: float, ms: float,
+                   min_enroll_ms: float) -> tuple[str, int, float]:
+    """三段式认人判定（纯函数，线上 match_or_create 与 diarize_eval 重放共用）。
+
+    centroids 为各根人的 (质心未归一化均值, 向量数)；emb 为该簇聚合音色向量。
+    返回 (action, best_idx, best_sim)：action=merge 归入并应更新质心、
+    attach 只挂靠不动质心、new 新建说话人。空库保底新建（首段音频锚点）。
+    """
+    emb = normalize(emb)
+    best_idx, best_sim = -1, -1.0
+    for i, (c, n) in enumerate(centroids):
+        sim = float(np.dot(emb, normalize(np.asarray(c, dtype=np.float32))))
+        if sim > best_sim:
+            best_idx, best_sim = i, sim
+    if best_idx >= 0 and best_sim >= threshold:
+        return "merge", best_idx, best_sim
+    if best_idx >= 0 and (ms < min_enroll_ms or best_sim >= threshold - GRAY_MARGIN):
+        return "attach", best_idx, best_sim
+    return "new", best_idx, best_sim
+
+
 def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: float,
                     ms: float, min_enroll_ms: float) -> str:
     """与会话内各根人的质心比余弦；达标归入并滑动更新质心。
 
-    三段式：达标 → 归入并更新质心；擦边（差 0.10 以内）或素材不足 →
-    只挂最像的已有根人（不新建也不动质心，避免挂错向量污染质心）；
-    明显不像且素材充足才是真正的新说话人。空库保底新建（首段音频锚点）。
+    判定走 match_decision；merge 归入并更新质心，attach 只挂最像的已有
+    根人（不新建也不动质心，避免挂错向量污染质心），new 才是真正的新说话人。
 
     centroid 存的是各成员向量的真实均值（未归一化），比较时归一，
     这样滑动更新 (均值*n + 新向量)/(n+1) 才是精确的。"""
-    emb = normalize(emb)
     persons = load_persons(db, session_id)
-    best: Person | None = None
-    best_sim = -1.0
-    for p in persons.values():
-        if p.merged_into or not p.centroid:
-            continue
-        sim = float(np.dot(emb, normalize(np.frombuffer(p.centroid, dtype=np.float32))))
-        if sim > best_sim:
-            best, best_sim = p, sim
-    if best is not None and best_sim >= threshold:
+    roots = [(normalize(np.frombuffer(p.centroid, dtype=np.float32)), p.embed_count)
+             for p in persons.values() if not p.merged_into and p.centroid]
+    action, idx, _ = match_decision(roots, emb, threshold, ms, min_enroll_ms)
+    if action != "new":
+        best = [p for p in persons.values() if not p.merged_into and p.centroid][idx]
+    if action == "merge":
         n = best.embed_count
-        centroid = (np.frombuffer(best.centroid, dtype=np.float32) * n + emb) / (n + 1)
+        centroid = (np.frombuffer(best.centroid, dtype=np.float32) * n
+                    + normalize(emb)) / (n + 1)
         best.centroid = np.asarray(centroid, dtype=np.float32).tobytes()
         best.embed_count = n + 1
         return best.id
-    if best is not None and (ms < min_enroll_ms or best_sim >= threshold - GRAY_MARGIN):
+    if action == "attach":
         return best.id
-    root_count = sum(1 for p in persons.values() if not p.merged_into)
+    root_count = len(roots)
     pid = _new_person_id()
     db.add(Person(id=pid, session_id=session_id, auto_label=f"说话人{root_count + 1}",
-                  centroid=np.asarray(emb, dtype=np.float32).tobytes(), embed_count=1))
+                  centroid=np.asarray(normalize(emb), dtype=np.float32).tobytes(),
+                  embed_count=1))
     return pid
 
 

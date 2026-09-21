@@ -62,7 +62,12 @@ class LlamaCppEngine(FunasrEngine):
                              disable_update=True)
         log.info("llama.cpp 引擎加载完成")
 
-    def transcribe(self, wav_path: str) -> list[Segment]:
+    def _cli_run(self, wav_path: str) -> tuple[list[dict], list[dict] | None]:
+        """跑 llama-funasr-cli：返回 (VAD 段落, 逐字时间戳或 None)。
+
+        对齐必须在临时目录内完成——编码器落盘文件与目录同生命周期。
+        二进制没带落盘补丁时拿不到时间戳，调用方退化为整段单说话人。
+        """
         with tempfile.TemporaryDirectory(prefix="llamacpp_asr_") as tmp:
             dump_prefix = str(Path(tmp) / "seg")
             cmd = [self.bin_path, "--enc", self.enc_gguf, "-m", self.llm_gguf,
@@ -78,19 +83,29 @@ class LlamaCppEngine(FunasrEngine):
                     if line.startswith("{")]
             segs = [s for s in segs if s.get("text", "").strip()]
             if not segs:
-                return []
+                return [], None
             if not Path(f"{dump_prefix}.0.enc").exists():
-                # 二进制没带落盘补丁：拿不到逐字时间戳，退化为每段单说话人
                 log.warning("CLI 未产出编码器落盘，退化为整段单说话人"
                             "（换带补丁的构建可补回时间戳）")
-                fallback = [Segment(s["start_ms"], s["end_ms"],
-                                    s["text"].strip(), 0) for s in segs]
-                return fallback
+                return segs, None
             # 落盘文件与临时目录同生命周期，对齐须在目录删除前完成
             tokens: list[dict] = []
             for i, s in enumerate(segs):
                 tokens += self._align_segment(f"{dump_prefix}.{i}.enc",
                                               s["text"].strip(), s["start_ms"])
+            return segs, tokens or None
+
+    def raw_tokens(self, wav_path: str) -> list[dict] | None:
+        """转写并返回逐字时间戳 [{"token","start","end"(ms)}, ...]。
+
+        无法对齐时返回 None。与说话人阈值无关，diarize_eval 缓存复用。
+        """
+        return self._cli_run(wav_path)[1]
+
+    def transcribe(self, wav_path: str) -> list[Segment]:
+        segs, tokens = self._cli_run(wav_path)
+        if not segs:
+            return []
         if not tokens:
             return [Segment(s["start_ms"], s["end_ms"], s["text"].strip(), 0)
                     for s in segs]

@@ -313,23 +313,34 @@ class FunasrEngine(Engine):
                              disable_update=True)
         log.info("FunASR 模型加载完成")
 
-    def transcribe(self, wav_path: str) -> list[Segment]:
+    def _transcribe_raw(self, wav_path: str) -> tuple[list[dict], str]:
         res = self.asr.generate(input=wav_path, batch_size_s=300,
                                 output_timestamp=True, return_time_stamps=True)
         if not res:
-            return []
-        first = res[0]
-        raw_tokens = first.get("timestamps") or []
-        if not raw_tokens:
+            return [], ""
+        raw_tokens = res[0].get("timestamps") or []
+        tokens = [{"token": t["token"], "start": int(t["start_time"] * 1000),
+                   "end": int(t["end_time"] * 1000)} for t in raw_tokens]
+        return tokens, (res[0].get("text") or "").strip()
+
+    def raw_tokens(self, wav_path: str) -> list[dict] | None:
+        """转写并返回逐字时间戳 [{"token","start","end"(ms)}, ...]。
+
+        无时间戳输出时返回 None（调用方退化为整段单说话人）。
+        与说话人阈值无关，diarize_eval 缓存复用。
+        """
+        tokens, _ = self._transcribe_raw(wav_path)
+        return tokens or None
+
+    def transcribe(self, wav_path: str) -> list[Segment]:
+        tokens, text = self._transcribe_raw(wav_path)
+        if not tokens:
             # 没有逐字时间戳时退化为整段单说话人
-            text = (first.get("text") or "").strip()
             if not text:
                 return []
             with wave.open(wav_path, "rb") as w:
                 dur = int(w.getnframes() / w.getframerate() * 1000)
             return [Segment(0, dur, text, 0)]
-        tokens = [{"token": t["token"], "start": int(t["start_time"] * 1000),
-                   "end": int(t["end_time"] * 1000)} for t in raw_tokens]
         return self._diarize(wav_path, tokens)
 
     def _diarize(self, wav_path: str, tokens: list[dict]) -> list[Segment]:
