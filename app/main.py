@@ -214,7 +214,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 with db.begin_nested():
                     db.add(Task(id=job_id, tenant_id=tenant, session_id=session.id,
                                 status="pending_upload", idem_key=idempotency_key,
-                                created_at=now_iso()))
+                                created_at=now_iso(),
+                                hotwords=(body.hotwords or None)))
             except IntegrityError:
                 return _dup()
         return {"job_id": job_id, "session_id": session.id,

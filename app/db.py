@@ -19,6 +19,7 @@ from sqlalchemy import (
     event,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -63,6 +64,7 @@ class Task(Base):
     done_at: Mapped[str | None]
     upload_token: Mapped[str | None] = mapped_column(String(64), unique=True)
     upload_expires_at: Mapped[str | None] = mapped_column(String(40))
+    hotwords: Mapped[list | None] = mapped_column(JSONB)  # 任务级热词（纠偏用）
     __table_args__ = (
         UniqueConstraint("session_id", "idem_key"),
         Index("idx_tasks_session", "session_id", "seq"),
@@ -149,6 +151,7 @@ def init_db(engine) -> None:
         conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS upload_expires_at varchar(40)"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_tasks_upload_token ON tasks(upload_token)"))
         conn.execute(text("ALTER TABLE tasks ALTER COLUMN seq DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS hotwords jsonb"))
 
 
 @contextmanager
