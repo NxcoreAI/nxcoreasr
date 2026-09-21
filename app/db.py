@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import (
-    JSON,
     LargeBinary,
     String,
     Text,
@@ -20,6 +19,7 @@ from sqlalchemy import (
     event,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -64,7 +64,7 @@ class Task(Base):
     done_at: Mapped[str | None]
     upload_token: Mapped[str | None] = mapped_column(String(64), unique=True)
     upload_expires_at: Mapped[str | None] = mapped_column(String(40))
-    hotwords: Mapped[list | None] = mapped_column(JSON)  # 任务级热词（纠偏用）
+    hotwords: Mapped[list | None] = mapped_column(JSONB)  # 任务级热词（纠偏用）
     __table_args__ = (
         UniqueConstraint("session_id", "idem_key"),
         Index("idx_tasks_session", "session_id", "seq"),

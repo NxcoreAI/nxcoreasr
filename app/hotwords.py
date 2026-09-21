@@ -14,26 +14,34 @@ ASR 的主力错误形态（实测：汪工→王工、星桥剑社→星桥建�
   这类绝不是期望行为）；
 - 长热词优先（先长后短，避免「星桥建设有限公司」被「建设」抢先半截）；
 - 与热词相同的片段是 no-op，不重复替换、不重叠替换。
+
+已知局限：
+- 多音字按**候选片段本身**取音（lazy_pinyin 对 span 整段调用），不是按
+  整段转写文本取音——位于片段边界、发音依赖外部上下文的多音字可能取错
+  音。例如「银行」在片段内正确取 xíng，但孤立的「行」无法区分 xíng/háng。
+- 等长且互为同音的热词（如「王工」/「汪工」）命中顺序由输入顺序决定：
+  先出现的先匹配，行为确定。
+- seg.text 被替换后，若引擎输出含词级时间戳，词与文本对齐关系可能失效
+  （当前引擎无此依赖，Utterance 时间戳来自 segment 级而非词级）。
 """
 from __future__ import annotations
 
+import functools
+import logging
+
 from pypinyin import lazy_pinyin
+
+log = logging.getLogger(__name__)
 
 MIN_WORD_LEN = 2
 MAX_WORD_LEN = 20
 
-_syllables_cache: dict[str, list[str]] = {}
 
-
-def _syllables(text: str) -> list[str]:
-    """不带调拼音序列（多音字按整段上下文取音）。小缓存：热词表逐任务复用。"""
-    cached = _syllables_cache.get(text)
-    if cached is None:
-        cached = lazy_pinyin(text, errors="ignore")
-        if len(_syllables_cache) > 4096:
-            _syllables_cache.clear()
-        _syllables_cache[text] = cached
-    return cached
+@functools.lru_cache(maxsize=4096)
+def _syllables(text: str) -> tuple[str, ...]:
+    """不带调拼音序列。多音字按候选片段上下文取音（见模块级已知局限）。
+    返回 tuple：不可变，防缓存值被外部意外修改。"""
+    return tuple(lazy_pinyin(text, errors="ignore"))
 
 
 def apply_hotwords(text: str, hotwords: list[str] | None) -> str:
@@ -48,6 +56,11 @@ def apply_hotwords(text: str, hotwords: list[str] | None) -> str:
         if MIN_WORD_LEN <= len(w) <= MAX_WORD_LEN and w not in seen:
             seen.add(w)
             words.append(w)
+        elif w and w not in seen:
+            # 可观测性：无效热词静默丢弃是工单排查的盲区
+            log.warning("热词被过滤（长度 %d 超出 [%d,%d] 或为空）: %r",
+                        len(w), MIN_WORD_LEN, MAX_WORD_LEN, w[:20])
+            seen.add(w)
     words.sort(key=len, reverse=True)
     if not words:
         return text
@@ -66,8 +79,10 @@ def apply_hotwords(text: str, hotwords: list[str] | None) -> str:
                 i += k
                 matched = True
                 break
-            # 逐字数需一致（拼音按整段取音以处理多音字）
-            if len(span) == k and _syllables(span) == _syllables(w):
+            # 音节数必须等于字符数——排除纯非汉字片段（英文/数字/符号的
+            # 拼音序列为空元组 ()，() == () 会误匹配任意等长非汉字对）
+            span_syl = _syllables(span)
+            if len(span_syl) == k and span_syl == _syllables(w):
                 out.append(w)
                 i += k
                 matched = True
