@@ -327,25 +327,42 @@ def create_app(config_path: str | None = None) -> FastAPI:
             })
         return out
 
+    def _task_body(db, task: Task) -> dict:
+        session = db.get(SessionRecord, task.session_id)
+        body = {
+            "task_id": task.id, "session_id": task.session_id, "seq": task.seq,
+            "status": task.status, "error": task.error,
+            "duration_ms": task.duration_ms, "created_at": task.created_at,
+            "done_at": task.done_at,
+            "session_version": session.version if session else None,
+        }
+        if task.status == "done":
+            rows = db.scalars(select(Utterance).where(Utterance.task_id == task.id)
+                              .order_by(Utterance.seq)).all()
+            body["utterances"] = _utterances_payload(db, task.session_id, rows)
+        return body
+
     @app.get("/v1/tasks/{tid}")
     def get_task(tid: str, request: Request, tenant: str = Depends(require_tenant)):
         with tenant_session(request.app.state.db_engine, tenant) as db:
             task = db.get(Task, tid)
             if task is None:
                 raise HTTPException(404, "任务不存在")
-            session = db.get(SessionRecord, task.session_id)
-            body = {
-                "task_id": task.id, "session_id": task.session_id, "seq": task.seq,
-                "status": task.status, "error": task.error,
-                "duration_ms": task.duration_ms, "created_at": task.created_at,
-                "done_at": task.done_at,
-                "session_version": session.version if session else None,
-            }
-            if task.status == "done":
-                rows = db.scalars(select(Utterance).where(Utterance.task_id == tid)
-                                  .order_by(Utterance.seq)).all()
-                body["utterances"] = _utterances_payload(db, task.session_id, rows)
-        return body
+            return _task_body(db, task)
+
+    @app.get("/v1/tasks")
+    def get_tasks(request: Request, ids: str = "",
+                  tenant: str = Depends(require_tenant)):
+        """批量轮询：?ids=a,b,c（上限 100），一次取回多个任务的状态与结果，
+        供 SaaS worker 合并轮询，替代逐 task 的 GET 往返。"""
+        id_list = [x.strip() for x in ids.split(",") if x.strip()][:100]
+        if not id_list:
+            raise HTTPException(422, "ids 参数不能为空")
+        with tenant_session(request.app.state.db_engine, tenant) as db:
+            tasks = {t.id: t for t in db.scalars(
+                select(Task).where(Task.id.in_(id_list))).all()}
+            return {"tasks": [_task_body(db, tasks[tid])
+                              for tid in id_list if tid in tasks]}
 
     @app.get("/v1/sessions/{sid}/tasks")
     def list_tasks(sid: str, request: Request, limit: int = 50,
