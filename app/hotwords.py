@@ -15,12 +15,15 @@ ASR 的主力错误形态（实测：汪工→王工、星桥剑社→星桥建�
 - 长热词优先（先长后短，避免「星桥建设有限公司」被「建设」抢先半截）；
 - 与热词相同的片段是 no-op，不重复替换、不重叠替换。
 
+匹配复杂度：O(N × L)，N=文本长度、L=热词长度种类数（≤19）——每个位置
+对每种长度只算一次窗口拼音，音节匹配用字典查找。替代朴素 O(N × W × k)。
+
 已知局限：
 - 多音字按**候选片段本身**取音（lazy_pinyin 对 span 整段调用），不是按
   整段转写文本取音——位于片段边界、发音依赖外部上下文的多音字可能取错
   音。例如「银行」在片段内正确取 xíng，但孤立的「行」无法区分 xíng/háng。
 - 等长且互为同音的热词（如「王工」/「汪工」）命中顺序由输入顺序决定：
-  先出现的先匹配，行为确定。
+  先出现的先匹配（构建查找表时后者覆盖前者），行为确定。
 - seg.text 被替换后，若引擎输出含词级时间戳，词与文本对齐关系可能失效
   （当前引擎无此依赖，Utterance 时间戳来自 segment 级而非词级）。
 """
@@ -44,6 +47,23 @@ def _syllables(text: str) -> tuple[str, ...]:
     return tuple(lazy_pinyin(text, errors="ignore"))
 
 
+def _build_lookup(words: list[str]) -> tuple[set[str], dict[int, dict[tuple[str, ...], str]], list[int]]:
+    """热词表 → 索引结构：精确命中集 + 按长度分组的拼音查找表 + 长度降序列表。
+
+    同长度且同音的热词：后加入的覆盖先加入的（dict 覆盖语义）——等长同音
+    场景由输入顺序决定优先级，行为确定（已在模块 docstring 文档化）。
+    """
+    exact: set[str] = set()
+    by_len: dict[int, dict[tuple[str, ...], str]] = {}
+    for w in words:
+        exact.add(w)
+        w_syl = _syllables(w)
+        # 音节数≠字符数的热词（含非汉字）跳过查找表——同音匹配无意义
+        if len(w_syl) == len(w):
+            by_len.setdefault(len(w), {})[w_syl] = w
+    return exact, by_len, sorted(by_len.keys(), reverse=True)
+
+
 def apply_hotwords(text: str, hotwords: list[str] | None) -> str:
     """对一段转写文本按热词表做同音纠偏，返回修正后的文本。"""
     if not text or not hotwords:
@@ -61,32 +81,33 @@ def apply_hotwords(text: str, hotwords: list[str] | None) -> str:
             log.warning("热词被过滤（长度 %d 超出 [%d,%d] 或为空）: %r",
                         len(w), MIN_WORD_LEN, MAX_WORD_LEN, w[:20])
             seen.add(w)
-    words.sort(key=len, reverse=True)
     if not words:
         return text
+    exact, by_len, lengths = _build_lookup(words)
     out: list[str] = []          # 已定稿的字符（含替换产物）
     i = 0
     n = len(text)
     while i < n:
         matched = False
-        for w in words:
-            k = len(w)
+        for k in lengths:        # ≤19 种长度，降序
             if i + k > n:
                 continue
             span = text[i:i + k]
-            if span == w:
-                out.append(w)
+            if span in exact:    # 精确命中快路径（免拼音计算）
+                out.append(span)
                 i += k
                 matched = True
                 break
             # 音节数必须等于字符数——排除纯非汉字片段（英文/数字/符号的
             # 拼音序列为空元组 ()，() == () 会误匹配任意等长非汉字对）
             span_syl = _syllables(span)
-            if len(span_syl) == k and span_syl == _syllables(w):
-                out.append(w)
-                i += k
-                matched = True
-                break
+            if len(span_syl) == k:
+                w = by_len[k].get(span_syl)
+                if w:
+                    out.append(w)
+                    i += k
+                    matched = True
+                    break
         if not matched:
             out.append(text[i])
             i += 1
