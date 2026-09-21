@@ -12,6 +12,7 @@ import numpy as np
 from sqlalchemy import update
 
 from .config import AppConfig
+from .hotwords import apply_hotwords
 from .db import SessionRecord, Task, Utterance, now_iso, tenant_session
 from .engine.base import Engine, normalize
 from .speakers import match_or_create
@@ -115,6 +116,11 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, storage, tenant: str
         t = time.monotonic()
         segments = engine.transcribe(wav)
         transcribe_ms = int((time.monotonic() - t) * 1000)
+        # 热词同音纠偏（用户人物库专有名词，任务级携带）：落库前修正专有名词
+        # 错字——严格同音替换，保守取向见 app/hotwords.py。
+        if task.hotwords:
+            for seg in segments:
+                seg.text = apply_hotwords(seg.text, task.hotwords)
         segments.sort(key=lambda s: s.start_ms)
 
         # 音频内聚类合并 FunASR 的碎编号，再与会话说话人库对齐
