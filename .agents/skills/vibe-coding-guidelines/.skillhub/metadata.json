@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "registry": "https://skillshub.vyitec.com",
+  "namespace": "global",
+  "slug": "vibe-coding-guidelines",
+  "version": "1.0.0",
+  "versionId": 1,
+  "fingerprint": "sha256:15b33f29faca4c1bfe2347a5d4876164ca5c5472bf47aec5062e299cb0fd94bc",
+  "files": {
+    "LICENSE.txt": "99d34d9945b0f76aae3d627178bdd70d05bd2aa099277aa218910e9e85d6cc38",
+    "NOTICE.md": "2b4fd0324e1a6f593914ce0c6ca211637d726b17b83409466fc8ffa878c370ef",
+    "SKILL.md": "43eb1e7a42d557e04358d1feca528d653aeef23be5a7babba6572441e1639b12",
+    "references/claude-md-snippets.md": "936624cb441883f57b2a100ee7d4c7d15038854003352ba01ec317a38db2cac0"
+  },
+  "source": "skillhub",
+  "agent": "generic",
+  "installedAt": "2026-09-19T13:25:58.576Z"
+}
