@@ -12,6 +12,7 @@ import numpy as np
 from sqlalchemy import update
 
 from .config import AppConfig
+from . import events
 from .hotwords import apply_hotwords
 from .db import SessionRecord, Task, Utterance, now_iso, tenant_session
 from .engine.base import Engine, normalize
@@ -152,6 +153,7 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, storage, tenant: str
             storage.delete(key)
         else:
             Path(src).unlink(missing_ok=True)
+        events.publish(tenant, task_id, "done")
         speech_ms = sum(s.end_ms - s.start_ms for s in segments)
         speech_pct = speech_ms * 100 // record_ms if record_ms else 0
         log.info("任务完成 tenant=%s task=%s 耗时=%dms 句数=%d 录音=%.1fs 语音=%.1fs(%d%%) 转码=%dms 转写=%dms",
@@ -166,6 +168,7 @@ def process_task(cfg: AppConfig, engine: Engine, db_engine, storage, tenant: str
                 failed.status = "failed"
                 failed.error = str(e)[:500]
                 failed.done_at = now_iso()
+                events.publish(tenant, task_id, "failed")
         log.warning("任务失败 tenant=%s task=%s err=%s", tenant, task_id, str(e)[:200])
     finally:
         Path(wav).unlink(missing_ok=True)

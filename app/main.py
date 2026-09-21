@@ -5,6 +5,7 @@
 tenant_session 访问数据，跨租户资源天然查不到，一律 404，不暴露
 "存在但无权"。
 """
+import asyncio
 import logging
 import os
 import secrets
@@ -17,6 +18,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
+from . import events
 from . import speakers as spk
 from .auth import require_tenant
 from .config import load_config
@@ -35,6 +37,7 @@ from .models import CreateJobReq, MergeReq, NameReq, RegisterSessionReq
 from .queueing import Scheduler
 from .speakers import SpeakerError
 from .storage import AliyunOssStorage, LocalObjectStorage, ObjectNotFound
+from .ws import TaskHub, ws_tasks
 
 log = logging.getLogger(__name__)
 
@@ -80,11 +83,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.scheduler = Scheduler(cfg, app.state.engine, app.state.db_engine,
                                         app.state.storage)
         app.state.scheduler.start()
+        # 任务推送：worker 线程的 done/failed 事件桥接到 WS 连接
+        app.state.task_hub = TaskHub()
+        app.state.task_hub.loop = asyncio.get_running_loop()
+        events.subscribe(app.state.task_hub.publish)
         yield
         app.state.scheduler.stop()
         app.state.db_engine.dispose()
 
     app = FastAPI(title="nxcore-asr", lifespan=lifespan)
+    app.websocket("/v1/ws/tasks")(ws_tasks)
 
     def _get_session(db_engine, tenant: str, sid: str) -> SessionRecord:
         with tenant_session(db_engine, tenant) as db:
