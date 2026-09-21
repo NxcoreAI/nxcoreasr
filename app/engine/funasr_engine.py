@@ -124,6 +124,44 @@ def smooth_turns(turns: list[list], min_ms: int = MIN_TURN_MS) -> list[list]:
     return merged
 
 
+PAUSE_MARKS = "，、；,;"  # 次级停顿：说话人切换也常发生在这些短语边界
+
+
+def resolve_turn_overlaps(turns: list[list], tokens: list[dict],
+                          snap_ms: int = HOP_MS) -> list[list]:
+    """相邻异人轮次因滑窗重叠会时间交叠（3s 窗 1s 步进最多叠 2s），字级
+    "最大重叠"裁决会把切换点附近的字系统性划给先发言人。
+
+    处理：把交叠段在句读边界处切开——优先句末标点、其次停顿标点（候选可
+    比后一轮起点再向前看 snap_ms，混叠窗把切换点裹进前一轮），取离交叠
+    中点最近的边界；无标点可用才退回几何中点。说话人切换几乎总发生在
+    短语边界，比窗口几何中点准（实测"我看着你的脸，|是嘉应学院"的切换
+    点被拖影 1.4s，句读吸附后归位）。
+    """
+    if len(turns) < 2:
+        return turns
+    out = [list(t) for t in turns]
+    for i in range(len(out) - 1):
+        a1, b1, k1 = out[i]
+        a2, b2, k2 = out[i + 1]
+        if k1 == k2 or b1 <= a2:
+            continue
+        mid = (a2 + b1) / 2
+        best_cut, best_d = None, None
+        for tok in tokens:
+            e = tok["end"]
+            if a2 - snap_ms <= e <= b1 and tok["token"] in SENTENCE_ENDERS + PAUSE_MARKS:
+                d = abs(e - mid)
+                # 句末标点优先（距离乘小系数），同距取句末
+                d *= 0.5 if tok["token"] in SENTENCE_ENDERS else 1.0
+                if best_d is None or d < best_d:
+                    best_cut, best_d = e, d
+        cut = int(best_cut) if best_cut is not None else int(mid)
+        out[i][1] = cut
+        out[i + 1][0] = cut
+    return out
+
+
 def token_speakers(tokens: list[dict], turns: list[list]) -> list[int]:
     """每个字按时间重叠最多的说话片段归人；标点没有独立音色，跟随邻侧的字。"""
     out: list[int | None] = [None] * len(tokens)
@@ -361,6 +399,7 @@ class FunasrEngine(Engine):
                     embs.append(normalize(np.asarray(emb).reshape(-1)))
             labels = cluster_windows(np.stack(embs), self.window_threshold)
         turns = smooth_turns(_merge_turns(wins, labels)) if wins else []
+        turns = resolve_turn_overlaps(turns, tokens) if turns else []
         speakers = smooth_token_runs(tokens, token_speakers(tokens, turns))
         return merge_short_fragments(group_segments(tokens, speakers))
 

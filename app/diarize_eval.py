@@ -44,11 +44,13 @@ def _segments_from_cache(tokens, embs, starts, ends, window_t: float):
     """缓存重放引擎侧：窗口聚类 -> turns -> 字归人 -> Segment 列表。"""
     from .engine.funasr_engine import (_merge_turns, cluster_windows,
                                        group_segments, merge_short_fragments,
+                                       resolve_turn_overlaps,
                                        smooth_token_runs, smooth_turns,
                                        token_speakers)
     wins = list(zip(starts, ends))
     labels = cluster_windows(embs, window_t) if len(wins) else []
     turns = smooth_turns(_merge_turns(wins, labels)) if wins else []
+    turns = resolve_turn_overlaps(turns, tokens) if turns else []
     speakers = smooth_token_runs(tokens, token_speakers(tokens, turns))
     return merge_short_fragments(group_segments(tokens, speakers))
 
@@ -375,16 +377,16 @@ def main():
 
     p = sub.add_parser("replay")
     p.add_argument("--window-t", type=float, default=0.65)
-    p.add_argument("--spk-t", type=float, default=0.45)
-    p.add_argument("--min-enroll-ms", type=float, default=6000)
+    p.add_argument("--spk-t", type=float, default=0.65)
+    p.add_argument("--min-enroll-ms", type=float, default=4000)
     p.add_argument("--gray-margin", type=float, default=0.10)
     p.add_argument("--name", default=None)
     p.set_defaults(fn=cmd_replay)
 
     p = sub.add_parser("sweep")
     p.add_argument("--window-t", default="0.65")
-    p.add_argument("--spk-t", default="0.45")
-    p.add_argument("--min-enroll-ms", default="6000")
+    p.add_argument("--spk-t", default="0.65")
+    p.add_argument("--min-enroll-ms", default="4000")
     p.add_argument("--gray-margin", type=float, default=0.10)
     p.set_defaults(fn=cmd_sweep)
 
