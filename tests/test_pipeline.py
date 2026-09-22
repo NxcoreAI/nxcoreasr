@@ -16,7 +16,9 @@ def test_in_audio_cluster_merge(tmp_path):
         Segment(5000, 5500, "对", 3),      # 0.5s 碎片，音色同 spk1
         Segment(1000, 3500, "长段A'", 4),  # 同 spk0 音色，被拆成新编号
     ]
-    clusters = cluster_local_speakers(FakeEngine(), str(wav_file), segments, 0.6)
+    engine = FakeEngine()
+    clusters = cluster_local_speakers(
+        lambda spans: engine.embed(str(wav_file), spans), segments, 0.6)
     assert len(clusters) == 2
     spk_sets = sorted([set(c["spks"]) for c in clusters], key=lambda s: sorted(s))
     assert spk_sets == [{0, 2, 4}, {1, 3}]
@@ -44,7 +46,9 @@ def test_in_audio_cluster_merge_needs_second_pass():
         Segment(10_000, 12_000, "B", 1),   # 60°：对 0° 余弦 0.5 < 0.6，单趟不并
         Segment(20_000, 21_900, "C", 2),   # 25°：并入 A 后 A 质心偏到约 10°，
     ]                                      # B 对新质心余弦 0.64 ≥ 0.6，第二趟应并上
-    clusters = cluster_local_speakers(AngleEngine(), "unused.wav", segments, 0.6)
+    engine = AngleEngine()
+    clusters = cluster_local_speakers(
+        lambda spans: engine.embed("unused.wav", spans), segments, 0.6)
     assert len(clusters) == 1
     assert set(clusters[0]["spks"]) == {0, 1, 2}
 
