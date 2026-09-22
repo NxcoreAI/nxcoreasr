@@ -93,20 +93,21 @@ def test_match_threshold_unit(test_database):
         v5 = np.zeros(8); v5[0] = 1.0
         assert match_or_create(db, "s2", v5, 0.6, 500.0, 6_000.0).startswith("spk_")
 
-        # 擦边区：最佳相似度落在 [阈值-0.10, 阈值) 且素材充足 → 挂最像的
-        # 已有人，不新建也不动质心（防止幽灵声纹随录音数累积）
+        # 擦边区：最佳相似度落在 [阈值-0.10, 阈值) → 挂最像的已有人，不新建、
+        # 质心不动（实验性挂靠学习 ATTACH_LEARN_ENABLED 默认关——四个 data case
+        # 回归显示任何门控下都会拉塌近场相近异人的分离）
         from app.db import Person
         db.add(SessionRecord(id="s3", tenant_id="t", external_id="z", status="active",
                              version=1, created_at=now_iso(), last_active_at=now_iso()))
         g1 = np.zeros(8); g1[0] = 1.0
         gp = match_or_create(db, "s3", g1, 0.6, 10_000.0, 6_000.0)
-        before = db.get(Person, gp)
+        before_bytes = db.get(Person, gp).centroid
         ang = np.deg2rad(55)  # cos55°≈0.574，落在 [0.5, 0.6)
         g2 = np.zeros(8); g2[0] = np.cos(ang); g2[1] = np.sin(ang)
         assert match_or_create(db, "s3", g2, 0.6, 10_000.0, 6_000.0) == gp
         after = db.get(Person, gp)
-        assert after.embed_count == before.embed_count == 1
-        assert after.centroid == before.centroid
+        assert after.embed_count == 1
+        assert after.centroid == before_bytes
         # 会话内仍只有一个人
         assert len(db.scalars(select(Person).where(Person.session_id == "s3")).all()) == 1
     eng.dispose()

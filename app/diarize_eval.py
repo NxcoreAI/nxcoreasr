@@ -163,24 +163,64 @@ def _prepare_one(engine, case: Path, name: str, wav: Path):
              dur_ms=_wav_ms(wav))
 
 
+def _find(parent: dict[int, int], x: int) -> int:
+    while x in parent:
+        x = parent[x]
+    return x
+
+
 def replay_case(case: Path, engine, window_t: float, spk_t: float,
-                min_enroll_ms: float, gray_margin: float, name: str):
+                min_enroll_ms: float, gray_margin: float, name: str,
+                legacy: bool = False, attach_learn: bool = False):
     """逐片重放线上管线，返回 (决策日志, 全时间轴 utterances, 最终人数)。
 
     与 process_task 同构：窗口聚类出的 segments -> cluster_local_speakers
-    -> match_decision 三段式；仅有的差别是不落库、质心在内存里滚动。
-    """
+    -> match_decision 认人（挂靠低权重学习）+ 每片后的库收敛（线上是录音潮
+    结束触发，重放逐片串行等价于最频繁的触发）；仅有的差别是不落库、
+    质心在内存里滚动。legacy=True 关掉两项修复，用于修前基线。"""
     import app.speakers as spk_mod
-    from .service import cluster_local_speakers
-    from .speakers import match_decision
+    from .service import (AUTO_MERGE_DORMANT_CHUNKS, AUTO_MERGE_MAX_VECTORS,
+                          AUTO_MERGE_SIM, cluster_local_speakers)
+    from .speakers import (ATTACH_LEARN, ATTACH_LEARN_MARGIN,
+                           match_decision)
 
     chunks = [p.stem for p in sorted((case / "chunks").glob("[0-9][0-9].m4a"))]
     offsets = json.loads((case / "cache" / "offsets.json").read_text())
     cache = _SpkEmbedCache(case, engine, window_t)
     centroids: list[tuple[np.ndarray, int]] = []
+    parent: dict[int, int] = {}  # 库收敛的合并指针（并查集）
+    last_touch: dict[int, int] = {}  # 每张卡最近一次吸收/挂靠所在的片号
     decisions, utterances = [], []
     saved_margin = spk_mod.GRAY_MARGIN
     spk_mod.GRAY_MARGIN = gray_margin
+
+    def consolidate(cur_chunk: int):
+        while True:
+            alive = [i for i in range(len(centroids)) if i not in parent]
+            best = None  # (sim, from薄卡, into厚卡)
+            for b in alive:
+                nb = centroids[b][1]
+                if nb > AUTO_MERGE_MAX_VECTORS:
+                    continue  # 只清理碎片：厚卡永不自动并
+                if cur_chunk - last_touch.get(b, 0) < AUTO_MERGE_DORMANT_CHUNKS:
+                    continue  # 活跃成长中的卡不是碎片（线上同款休眠判定）
+                for a in alive:
+                    na = centroids[a][1]
+                    if a == b or na <= nb:
+                        continue
+                    ca = centroids[a][0] / np.linalg.norm(centroids[a][0])
+                    cb = centroids[b][0] / np.linalg.norm(centroids[b][0])
+                    sim = float(ca @ cb)
+                    if sim >= AUTO_MERGE_SIM and (best is None or sim > best[0]):
+                        best = (sim, b, a)
+            if best is None:
+                return
+            _, src, dst = best
+            cs, ns = centroids[src]
+            cd, nd = centroids[dst]
+            centroids[dst] = ((cd * nd + cs * ns) / (nd + ns), nd + ns)
+            parent[src] = dst
+
     try:
         for idx, cname in enumerate(chunks):
             tokens, embs, starts, ends, _ = _load_cache(case, cname)
@@ -198,19 +238,24 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
                 segs, spk_t)
             pid_by_spk: dict[int, int] = {}
             for c in clusters:
-                action, best, sim = match_decision(
+                action, best, sim, second = match_decision(
                     centroids, c["emb"], spk_t, c["ms"], min_enroll_ms)
                 if action == "merge":
                     cen, n = centroids[best]
                     centroids[best] = ((cen * n + c["emb"]) / (n + 1), n + 1)
                     pid = best
                 elif action == "attach":
+                    if attach_learn and not legacy and sim - second >= ATTACH_LEARN_MARGIN:
+                        cen, n = centroids[best]
+                        centroids[best] = ((cen * n + ATTACH_LEARN * c["emb"])
+                                           / (n + ATTACH_LEARN), n)
                     pid = best
                 else:
                     centroids.append((c["emb"].copy(), 1))
                     pid = len(centroids) - 1
                 for s_ in c["spks"]:
                     pid_by_spk[s_] = pid
+                last_touch[pid] = idx + 1
                 decisions.append({
                     "chunk": idx + 1, "ms": c["ms"], "action": action,
                     "person": pid, "best_sim": round(float(sim), 3),
@@ -221,15 +266,20 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
                     "end_ms": offsets[idx] + s_.end_ms,
                     "person": pid_by_spk[s_.local_spk], "text": s_.text,
                 })
+            if not legacy:
+                consolidate(idx + 1)  # B：休眠薄卡回收（线上同款）；legacy 关闭
     finally:
         spk_mod.GRAY_MARGIN = saved_margin
+    for u in utterances:  # 库收敛的合并指针落回归属
+        u["person"] = _find(parent, u["person"])
     run = case / "runs" / name
     run.mkdir(parents=True, exist_ok=True)
     (run / "decisions.jsonl").write_text(
         "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions))
     (run / "utterances.jsonl").write_text(
         "\n".join(json.dumps(u, ensure_ascii=False) for u in utterances))
-    return decisions, utterances, len(centroids)
+    return decisions, utterances, len([i for i in range(len(centroids))
+                                       if i not in parent])
 
 
 def load_truth(case: Path):
@@ -288,10 +338,11 @@ def _engine_for(args):
 def cmd_replay(args):
     case = Path(args.case)
     engine = _engine_for(args)
-    name = args.name or f"wt{args.window_t}_st{args.spk_t}_me{int(args.min_enroll_ms)}"
+    name = args.name or ("legacy" if args.legacy else
+                         f"wt{args.window_t}_st{args.spk_t}_me{int(args.min_enroll_ms)}")
     decisions, utterances, n_persons = replay_case(
         case, engine, args.window_t, args.spk_t, args.min_enroll_ms,
-        args.gray_margin, name)
+        args.gray_margin, name, legacy=getattr(args, "legacy", False))
     truth = load_truth(case)
     print(f"重放完成：{len(utterances)} 条 / 最终说话人 {n_persons} 个"
           f"（决策日志 runs/{name}/decisions.jsonl）")
@@ -381,6 +432,8 @@ def main():
     p.add_argument("--min-enroll-ms", type=float, default=4000)
     p.add_argument("--gray-margin", type=float, default=0.10)
     p.add_argument("--name", default=None)
+    p.add_argument("--legacy", action="store_true",
+                   help="关掉挂靠软学习与库收敛（修前行为基线）")
     p.set_defaults(fn=cmd_replay)
 
     p = sub.add_parser("sweep")

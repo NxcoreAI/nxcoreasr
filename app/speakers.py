@@ -66,42 +66,59 @@ def name_map(db: Session, session_id: str) -> dict[str, dict]:
 GRAY_MARGIN = 0.10  # 擦边区宽度：最佳相似度落在 [阈值-0.10, 阈值) 时只挂靠不建卡。
                      # 真实远场音频里同人跨录音相似度常落在这个区间，直接新建会随录音数累积幽灵
 
+ATTACH_LEARN = 0.3  # 擦边挂靠的低权重质心学习率。完全不学会让远场相近嗓子永远
+                     # 停在灰区：每一片都重新押注、押歪了跌破建卡线就开新卡（实测
+                     # 一晚真实使用攒出 11 张碎片卡）；低权重既让库逐步收敛，一次
+                     # 挂错也带不偏质心。embed_count 只计整权向量，不随挂靠增长。
+
+ATTACH_LEARN_ENABLED = False  # 实验性挂靠学习总开关（见 match_or_create 内注释）
+
+ATTACH_LEARN_MARGIN = 0.10  # 学习的无歧义门控：最佳相似度须领先第二名这么多才学。
+                     # 近场相近异人的两张卡互相纠缠（领先 <0.1），学了会把两卡质心
+                     # 拉到一起、毁掉阈值辛苦建立的分离；远场碎片卡对主卡领先 0.3+，
+                     # 恰是需要学习收敛的场景。
+
 
 def match_decision(centroids: list[tuple[np.ndarray, int]], emb: np.ndarray,
                    threshold: float, ms: float,
-                   min_enroll_ms: float) -> tuple[str, int, float]:
+                   min_enroll_ms: float) -> tuple[str, int, float, float]:
     """三段式认人判定（纯函数，线上 match_or_create 与 diarize_eval 重放共用）。
 
     centroids 为各根人的 (质心未归一化均值, 向量数)；emb 为该簇聚合音色向量。
-    返回 (action, best_idx, best_sim)：action=merge 归入并应更新质心、
-    attach 只挂靠不动质心、new 新建说话人。空库保底新建（首段音频锚点）。
+    返回 (action, best_idx, best_sim, second_sim)：action=merge 归入并应更新
+    质心、attach 只挂靠不动质心、new 新建说话人。空库保底新建（首段音频
+    锚点）。second_sim 是次佳相似度，供挂靠学习的无歧义门控用。
     """
     emb = normalize(emb)
-    best_idx, best_sim = -1, -1.0
+    best_idx, best_sim, second_sim = -1, -1.0, -1.0
     for i, (c, n) in enumerate(centroids):
         sim = float(np.dot(emb, normalize(np.asarray(c, dtype=np.float32))))
         if sim > best_sim:
-            best_idx, best_sim = i, sim
+            second_sim, best_sim, best_idx = best_sim, sim, i
+        elif sim > second_sim:
+            second_sim = sim
     if best_idx >= 0 and best_sim >= threshold:
-        return "merge", best_idx, best_sim
+        return "merge", best_idx, best_sim, second_sim
     if best_idx >= 0 and (ms < min_enroll_ms or best_sim >= threshold - GRAY_MARGIN):
-        return "attach", best_idx, best_sim
-    return "new", best_idx, best_sim
+        return "attach", best_idx, best_sim, second_sim
+    return "new", best_idx, best_sim, second_sim
 
 
 def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: float,
                     ms: float, min_enroll_ms: float) -> str:
     """与会话内各根人的质心比余弦；达标归入并滑动更新质心。
 
-    判定走 match_decision；merge 归入并更新质心，attach 只挂最像的已有
-    根人（不新建也不动质心，避免挂错向量污染质心），new 才是真正的新说话人。
+    判定走 match_decision；merge 归入并整权更新质心；attach 只挂最像的
+    已有根人（不新建），默认不动质心（实验性低权重学习见 ATTACH_LEARN_
+    ENABLED）；new 才是真正的新说话人。
 
     centroid 存的是各成员向量的真实均值（未归一化），比较时归一，
     这样滑动更新 (均值*n + 新向量)/(n+1) 才是精确的。"""
     persons = load_persons(db, session_id)
     roots = [(normalize(np.frombuffer(p.centroid, dtype=np.float32)), p.embed_count)
              for p in persons.values() if not p.merged_into and p.centroid]
-    action, idx, _ = match_decision(roots, emb, threshold, ms, min_enroll_ms)
+    action, idx, best_sim, second_sim = match_decision(
+        roots, emb, threshold, ms, min_enroll_ms)
     if action != "new":
         best = [p for p in persons.values() if not p.merged_into and p.centroid][idx]
     if action == "merge":
@@ -112,6 +129,14 @@ def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: fl
         best.embed_count = n + 1
         return best.id
     if action == "attach":
+        if ATTACH_LEARN_ENABLED and best_sim - second_sim >= ATTACH_LEARN_MARGIN:
+            # 实验性（默认关）：无歧义挂靠低权重学习。远场灰区碎片靠它收敛，
+            # 但近场相近异人（互相纠缠 <0.1 领先）稳态会被打破——四个 data case
+            # 回归确认任何门控都救不了，留开关等远场 truth 标注后再评估
+            n = best.embed_count
+            centroid = (np.frombuffer(best.centroid, dtype=np.float32) * n
+                        + ATTACH_LEARN * normalize(emb)) / (n + ATTACH_LEARN)
+            best.centroid = np.asarray(centroid, dtype=np.float32).tobytes()
         return best.id
     root_count = len(roots)
     pid = _new_person_id()
