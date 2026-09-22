@@ -41,6 +41,24 @@ def test_multichar_context_pinyin():
     assert apply_hotwords("去银航办手续", ["银行"]) == "去银行办手续"
 
 
+def test_near_phone_for_long_words():
+    """≥3 字热词的近音等价类（2026-09-22）：前后鼻音/平翘舌/n-l。"""
+    # 前后鼻音：ming↔min（王建敏→王建明）
+    assert apply_hotwords("王建敏说的是", ["王建明"]) == "王建明说的是"
+    # 平翘舌：zhi↔zi（赵自强→赵志强）
+    assert apply_hotwords("赵自强负责这块", ["赵志强"]) == "赵志强负责这块"
+    # n↔l：niu↔liu（刘小楠→牛小楠 的反向：文本 liu 类错写纠回）
+    assert apply_hotwords("牛小兰来过电话", ["刘小楠"]) == "刘小楠来过电话"
+    # 严格同音是等价类的子集：原有行为不回归
+    assert apply_hotwords("星桥剑社的项目", ["星桥建设"]) == "星桥建设的项目"
+
+
+def test_near_phone_two_char_stays_strict():
+    """2 字热词保持严格同音——短词近音误伤面不可控（真总≠郑总）。"""
+    assert apply_hotwords("真总说的是", ["郑总"]) == "真总说的是"  # zhen≠zheng 近音不纠
+    assert apply_hotwords("正总说的是", ["郑总"]) == "郑总说的是"  # zheng=zheng 同音照纠
+
+
 def test_pipeline_carries_hotwords(client):
     """端到端：建单带 hotwords → fake 引擎转写 → 纠偏管道携带。fake 引擎
     输出恒为正确文本（「你好，我是第一位说话人」），无法直接验证纠偏改变
