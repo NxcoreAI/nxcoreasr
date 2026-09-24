@@ -124,11 +124,16 @@ class LlamaCppEngine(FunasrEngine):
         log_probs = self.ctc.log_softmax(dec_out)[0]
         target_ids = torch.tensor(self.ctc_tokenizer.encode(text),
                                   dtype=torch.int64)
-        out = []
-        for t in forced_align(log_probs, target_ids, self.blank_id):
-            out.append({
-                "token": self.ctc_tokenizer.decode([t["token"]]),
-                "start": offset_ms + int(t["start_time"]) * CTC_FRAME_MS,
-                "end": offset_ms + int(t["end_time"]) * CTC_FRAME_MS,
-            })
-        return out
+        raw = [{"token": self.ctc_tokenizer.decode([t["token"]]),
+                "start": int(t["start_time"]) * CTC_FRAME_MS,
+                "end": int(t["end_time"]) * CTC_FRAME_MS}
+               for t in forced_align(log_probs, target_ids, self.blank_id)]
+        # CTC 词表是汉字，英文 BPE token 对齐不出真实跨度——退化为单帧 60ms
+        # 桩（起点节奏正确、时长失真）。桩 token 的 end 拉伸到下一 token 的
+        # start 填满间隙，字级 run 时长恢复，说话人归属的 700ms 吸收门槛才对
+        # 英文生效（中文 token 真实跨度不受影响）。
+        for i, t in enumerate(raw):
+            if t["end"] - t["start"] <= CTC_FRAME_MS and i + 1 < len(raw):
+                t["end"] = max(t["end"], raw[i + 1]["start"])
+        return [{"token": t["token"], "start": offset_ms + t["start"],
+                 "end": offset_ms + t["end"]} for t in raw]
