@@ -5,6 +5,7 @@
 tenant_session 访问数据，跨租户资源天然查不到，一律 404，不暴露
 "存在但无权"。
 """
+import asyncio
 import logging
 import os
 import secrets
@@ -17,6 +18,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
+from . import events
 from . import speakers as spk
 from .auth import require_tenant
 from .config import load_config
@@ -35,6 +37,7 @@ from .models import CreateJobReq, MergeReq, NameReq, RegisterSessionReq
 from .queueing import Scheduler
 from .speakers import SpeakerError
 from .storage import AliyunOssStorage, LocalObjectStorage, ObjectNotFound
+from .ws import TaskHub, ws_tasks
 
 log = logging.getLogger(__name__)
 
@@ -80,11 +83,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.scheduler = Scheduler(cfg, app.state.engine, app.state.db_engine,
                                         app.state.storage)
         app.state.scheduler.start()
+        # 任务推送：worker 线程的 done/failed 事件桥接到 WS 连接
+        app.state.task_hub = TaskHub()
+        app.state.task_hub.loop = asyncio.get_running_loop()
+        events.subscribe(app.state.task_hub.publish)
         yield
         app.state.scheduler.stop()
         app.state.db_engine.dispose()
 
     app = FastAPI(title="nxcore-asr", lifespan=lifespan)
+    app.websocket("/v1/ws/tasks")(ws_tasks)
 
     def _get_session(db_engine, tenant: str, sid: str) -> SessionRecord:
         with tenant_session(db_engine, tenant) as db:
@@ -327,25 +335,42 @@ def create_app(config_path: str | None = None) -> FastAPI:
             })
         return out
 
+    def _task_body(db, task: Task) -> dict:
+        session = db.get(SessionRecord, task.session_id)
+        body = {
+            "task_id": task.id, "session_id": task.session_id, "seq": task.seq,
+            "status": task.status, "error": task.error,
+            "duration_ms": task.duration_ms, "created_at": task.created_at,
+            "done_at": task.done_at,
+            "session_version": session.version if session else None,
+        }
+        if task.status == "done":
+            rows = db.scalars(select(Utterance).where(Utterance.task_id == task.id)
+                              .order_by(Utterance.seq)).all()
+            body["utterances"] = _utterances_payload(db, task.session_id, rows)
+        return body
+
     @app.get("/v1/tasks/{tid}")
     def get_task(tid: str, request: Request, tenant: str = Depends(require_tenant)):
         with tenant_session(request.app.state.db_engine, tenant) as db:
             task = db.get(Task, tid)
             if task is None:
                 raise HTTPException(404, "任务不存在")
-            session = db.get(SessionRecord, task.session_id)
-            body = {
-                "task_id": task.id, "session_id": task.session_id, "seq": task.seq,
-                "status": task.status, "error": task.error,
-                "duration_ms": task.duration_ms, "created_at": task.created_at,
-                "done_at": task.done_at,
-                "session_version": session.version if session else None,
-            }
-            if task.status == "done":
-                rows = db.scalars(select(Utterance).where(Utterance.task_id == tid)
-                                  .order_by(Utterance.seq)).all()
-                body["utterances"] = _utterances_payload(db, task.session_id, rows)
-        return body
+            return _task_body(db, task)
+
+    @app.get("/v1/tasks")
+    def get_tasks(request: Request, ids: str = "",
+                  tenant: str = Depends(require_tenant)):
+        """批量轮询：?ids=a,b,c（上限 100），一次取回多个任务的状态与结果，
+        供 SaaS worker 合并轮询，替代逐 task 的 GET 往返。"""
+        id_list = [x.strip() for x in ids.split(",") if x.strip()][:100]
+        if not id_list:
+            raise HTTPException(422, "ids 参数不能为空")
+        with tenant_session(request.app.state.db_engine, tenant) as db:
+            tasks = {t.id: t for t in db.scalars(
+                select(Task).where(Task.id.in_(id_list))).all()}
+            return {"tasks": [_task_body(db, tasks[tid])
+                              for tid in id_list if tid in tasks]}
 
     @app.get("/v1/sessions/{sid}/tasks")
     def list_tasks(sid: str, request: Request, limit: int = 50,
