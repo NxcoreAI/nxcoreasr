@@ -87,3 +87,15 @@ def test_pipeline_carries_hotwords(client):
     r2 = client.post("/v1/asr-jobs", json={"external_id": "hotwords-e2e"},
                      headers=auth())
     assert r2.status_code == 200
+
+
+def test_homophone_tie_break_first_wins():
+    """同音热词撞卡先到先得：S 侧按优先级降序下发（在场人物最前），
+    转写里的第三种同音错写应纠成靠前的那个热词（2026-09-24 修复：原 dict
+    覆盖语义是后者胜出，正好把在场优先反转成在场必输）。"""
+    # ≥3 字近音档
+    assert apply_hotwords("李占瓶在开会", ["李占平", "李占萍"]) == "李占平在开会"
+    assert apply_hotwords("李占瓶在开会", ["李占萍", "李占平"]) == "李占萍在开会"
+    # 2 字不带调同音档（亡/王/汪同为 wang）
+    assert apply_hotwords("亡工确认了", ["王工", "汪工"]) == "王工确认了"
+    assert apply_hotwords("亡工确认了", ["汪工", "王工"]) == "汪工确认了"
