@@ -25,6 +25,7 @@ from .config import load_config
 from .db import (
     Person,
     SessionRecord,
+    TaskCluster,
     Task,
     Utterance,
     build_engine,
@@ -180,7 +181,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             paths = [r[0] for r in db.execute(
                 select(Task.audio_path).where(Task.session_id == sid,
                                               Task.audio_path.is_not(None))).all()]
-            for model in (Utterance, Person, Task):
+            for model in (Utterance, TaskCluster, Person, Task):
                 db.execute(delete(model).where(model.session_id == sid))
             db.execute(delete(SessionRecord).where(SessionRecord.id == sid))
         for p in paths:
@@ -348,7 +349,47 @@ def create_app(config_path: str | None = None) -> FastAPI:
             rows = db.scalars(select(Utterance).where(Utterance.task_id == task.id)
                               .order_by(Utterance.seq)).all()
             body["utterances"] = _utterances_payload(db, task.session_id, rows)
+            body["speakers"] = _speakers_payload(db, task.session_id, task_id=task.id)
         return body
+
+    # 聚人优先级：attach（灰区挂靠，身份未确认）最保守，压过一切——写穿/
+    # 自动继承误伤的代价远大于多降级一轨；merge（过阈值并更新质心）次之，
+    # 身份确认过、比 new 更有信息量；new 兜底。
+    _CONFIRM_RANK = {"attach": 0, "merge": 1, "new": 2}
+
+    def _speakers_payload(db, session_id: str, task_id: str | None = None) -> list[dict]:
+        """认人元数据按根人归并：[{person_id, action, best_sim, second_sim,
+        reattributed}]，task_id 省略时聚合整个会话。
+
+        action=merge|attach|new（存量行无记录为 null，消费方按正常轨处理）；
+        多簇/多任务聚人时 action 取 attach > merge > new 中最先命中者，
+        best_sim/second_sim 取该 action 下素材最多的一簇；reattributed 标记
+        归属被录音潮后的重归属改写过。合并（merged_into）后按根人归拢，
+        unmerge 不改写元数据、重读即按新根人解析。"""
+        names = spk.name_map(db, session_id)
+        q = select(TaskCluster).where(TaskCluster.session_id == session_id)
+        if task_id:
+            q = q.where(TaskCluster.task_id == task_id)
+        rows = db.scalars(q).all()
+        agg: dict[str, dict] = {}
+        for r in sorted(rows, key=lambda r: r.ms, reverse=True):
+            root = names.get(r.person_id, {}).get("person_id", r.person_id)
+            e = agg.setdefault(root, {"person_id": root, "action": None,
+                                      "best_sim": None, "second_sim": None,
+                                      "reattributed": False})
+            e["reattributed"] = e["reattributed"] or bool(r.reattributed)
+            if r.action is None:
+                continue
+            if e["action"] is None or _CONFIRM_RANK[r.action] < _CONFIRM_RANK[e["action"]]:
+                e["action"], e["best_sim"], e["second_sim"] = (
+                    r.action, r.best_sim, r.second_sim)
+        out = []
+        for e in agg.values():
+            for k in ("best_sim", "second_sim"):
+                if e[k] is not None:
+                    e[k] = round(e[k], 3)
+            out.append(e)
+        return out
 
     @app.get("/v1/tasks/{tid}")
     def get_task(tid: str, request: Request, tenant: str = Depends(require_tenant)):
@@ -408,8 +449,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 q = q.where(Utterance.person_id.in_(pids))
             rows = db.scalars(q.order_by(Utterance.id).limit(limit)).all()
             items = _utterances_payload(db, sid, rows)
+            speakers = _speakers_payload(db, sid)
         return {"session_id": sid, "session_version": session.version,
                 "utterances": items,
+                "speakers": speakers,
                 "next_cursor": items[-1]["cursor"] if items else after}
 
     @app.post("/v1/tasks/{tid}/retry")

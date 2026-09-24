@@ -179,8 +179,9 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
     结束触发，重放逐片串行等价于最频繁的触发）；仅有的差别是不落库、
     质心在内存里滚动。legacy=True 关掉两项修复，用于修前基线。"""
     import app.speakers as spk_mod
-    from .service import (AUTO_MERGE_DORMANT_CHUNKS, AUTO_MERGE_MAX_VECTORS,
-                          AUTO_MERGE_SIM, cluster_local_speakers)
+    from .service import (AUTO_MERGE_DORMANT_CHUNKS, AUTO_MERGE_MAX_SPOKEN_MS,
+                          AUTO_MERGE_MAX_VECTORS, AUTO_MERGE_SIM,
+                          REATTRIBUTE_MARGIN, cluster_local_speakers)
     from .speakers import (ATTACH_LEARN, ATTACH_LEARN_MARGIN,
                            match_decision)
 
@@ -189,10 +190,33 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
     cache = _SpkEmbedCache(case, engine, window_t)
     centroids: list[tuple[np.ndarray, int]] = []
     parent: dict[int, int] = {}  # 库收敛的合并指针（并查集）
-    last_touch: dict[int, int] = {}  # 每张卡最近一次吸收/挂靠所在的片号
+    last_touch: dict[int, int] = {}  # 每张卡最近一次身份确认所在的片号
+    spoken_ms: dict[int, int] = {}   # 每张卡累计说话毫秒（碎片判定用）
+    clusters_rec: list[dict] = []    # 每簇 {emb, pid, ui}，重归属用（线上 task_clusters）
     decisions, utterances = [], []
     saved_margin = spk_mod.GRAY_MARGIN
     spk_mod.GRAY_MARGIN = gray_margin
+
+    def live_centroids():
+        return [(c, n) for i, (c, n) in enumerate(centroids) if i not in parent]
+
+    def reattribute():
+        # 线上同款：库收敛后用当前库重判历史簇（少言者建卡晚，早前挂靠吸走的改判）
+        live_idx = [i for i in range(len(centroids)) if i not in parent]
+        if not live_idx:
+            return
+        cen = {i: centroids[i][0] / np.linalg.norm(centroids[i][0])
+               for i in live_idx}
+        for rec in clusters_rec:
+            cur = _find(parent, rec['pid'])
+            if cur not in cen:
+                continue
+            emb = rec['emb']
+            best_i = max(live_idx, key=lambda i: float(emb @ cen[i]))
+            if best_i != cur and float(emb @ cen[best_i]) - float(emb @ cen[cur]) >= REATTRIBUTE_MARGIN:
+                rec['pid'] = best_i
+                for u in rec['ui']:
+                    utterances[u]['person'] = best_i
 
     def consolidate(cur_chunk: int):
         while True:
@@ -202,6 +226,8 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
                 nb = centroids[b][1]
                 if nb > AUTO_MERGE_MAX_VECTORS:
                     continue  # 只清理碎片：厚卡永不自动并
+                if spoken_ms.get(b, 0) > AUTO_MERGE_MAX_SPOKEN_MS:
+                    continue  # 说话多的卡不是碎片（线上同款时长闸）
                 if cur_chunk - last_touch.get(b, 0) < AUTO_MERGE_DORMANT_CHUNKS:
                     continue  # 活跃成长中的卡不是碎片（线上同款休眠判定）
                 for a in alive:
@@ -237,9 +263,13 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
                 lambda spans: spk_embs[emb_by_spans[tuple(sorted(spans))]][0],
                 segs, spk_t)
             pid_by_spk: dict[int, int] = {}
+            rec_by_spk: dict[int, dict] = {}
+            live = live_centroids()
+            live_idx = [i for i in range(len(centroids)) if i not in parent]
             for c in clusters:
                 action, best, sim, second = match_decision(
-                    centroids, c["emb"], spk_t, c["ms"], min_enroll_ms)
+                    live, c["emb"], spk_t, c["ms"], min_enroll_ms)
+                best = live_idx[best] if best >= 0 else best  # 映射回原卡号
                 if action == "merge":
                     cen, n = centroids[best]
                     centroids[best] = ((cen * n + c["emb"]) / (n + 1), n + 1)
@@ -255,12 +285,20 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
                     pid = len(centroids) - 1
                 for s_ in c["spks"]:
                     pid_by_spk[s_] = pid
-                last_touch[pid] = idx + 1
+                rec = {"emb": c["emb"], "pid": pid, "ui": []}
+                clusters_rec.append(rec)
+                for s_ in c["spks"]:
+                    rec_by_spk[s_] = rec
+                if action != "attach":  # 休眠只认身份确认；挂靠喂数不算醒（线上同款）
+                    last_touch[pid] = idx + 1
                 decisions.append({
                     "chunk": idx + 1, "ms": c["ms"], "action": action,
                     "person": pid, "best_sim": round(float(sim), 3),
                 })
             for s_ in segs:
+                pid_u = _find(parent, pid_by_spk[s_.local_spk])
+                spoken_ms[pid_u] = spoken_ms.get(pid_u, 0) + (s_.end_ms - s_.start_ms)
+                rec_by_spk[s_.local_spk]["ui"].append(len(utterances))
                 utterances.append({
                     "chunk": idx + 1, "start_ms": offsets[idx] + s_.start_ms,
                     "end_ms": offsets[idx] + s_.end_ms,
@@ -268,6 +306,7 @@ def replay_case(case: Path, engine, window_t: float, spk_t: float,
                 })
             if not legacy:
                 consolidate(idx + 1)  # B：休眠薄卡回收（线上同款）；legacy 关闭
+                reattribute()         # C：新卡就位后重判历史挂靠簇（线上同款）
     finally:
         spk_mod.GRAY_MARGIN = saved_margin
     for u in utterances:  # 库收敛的合并指针落回归属

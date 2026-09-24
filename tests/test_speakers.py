@@ -76,22 +76,26 @@ def test_match_threshold_unit(test_database):
         db.add(SessionRecord(id="s1", tenant_id="t", external_id="x", status="active",
                              version=1, created_at=now_iso(), last_active_at=now_iso()))
         v = np.zeros(8); v[0] = 1.0
-        p1 = match_or_create(db, "s1", v, 0.6, 10_000.0, 6_000.0)
-        # 很相近的向量 → 同一个人
+        r1 = match_or_create(db, "s1", v, 0.6, 10_000.0, 6_000.0)
+        p1 = r1.pid
+        assert r1.action == "new"
+        # 很相近的向量 → 同一个人（过阈值=确认归并）
         v2 = np.zeros(8); v2[0] = 1.0; v2[1] = 0.1
-        assert match_or_create(db, "s1", v2, 0.6, 1_000.0, 6_000.0) == p1
+        r2 = match_or_create(db, "s1", v2, 0.6, 1_000.0, 6_000.0)
+        assert r2.pid == p1 and r2.action == "merge" and r2.best_sim >= 0.6
         # 正交向量但素材充足 → 新人
         v3 = np.zeros(8); v3[3] = 1.0
-        p3 = match_or_create(db, "s1", v3, 0.6, 10_000.0, 6_000.0)
+        p3 = match_or_create(db, "s1", v3, 0.6, 10_000.0, 6_000.0).pid
         assert p3 != p1
         # 正交向量但素材不足 → 不新建，挂最像的已有说话人（碎片声纹防线）
         v4 = np.zeros(8); v4[6] = 1.0
-        assert match_or_create(db, "s1", v4, 0.6, 2_000.0, 6_000.0) in (p1, p3)
+        r4 = match_or_create(db, "s1", v4, 0.6, 2_000.0, 6_000.0)
+        assert r4.pid in (p1, p3) and r4.action == "attach" and r4.best_sim < 0.6
         # 素材不足 + 空库 → 保底新建（首段音频锚点）
         db.add(SessionRecord(id="s2", tenant_id="t", external_id="y", status="active",
                              version=1, created_at=now_iso(), last_active_at=now_iso()))
         v5 = np.zeros(8); v5[0] = 1.0
-        assert match_or_create(db, "s2", v5, 0.6, 500.0, 6_000.0).startswith("spk_")
+        assert match_or_create(db, "s2", v5, 0.6, 500.0, 6_000.0).pid.startswith("spk_")
 
         # 擦边区：最佳相似度落在 [阈值-0.10, 阈值) → 挂最像的已有人，不新建、
         # 质心不动（实验性挂靠学习 ATTACH_LEARN_ENABLED 默认关——四个 data case
@@ -100,17 +104,53 @@ def test_match_threshold_unit(test_database):
         db.add(SessionRecord(id="s3", tenant_id="t", external_id="z", status="active",
                              version=1, created_at=now_iso(), last_active_at=now_iso()))
         g1 = np.zeros(8); g1[0] = 1.0
-        gp = match_or_create(db, "s3", g1, 0.6, 10_000.0, 6_000.0)
+        gp = match_or_create(db, "s3", g1, 0.6, 10_000.0, 6_000.0).pid
         before_bytes = db.get(Person, gp).centroid
         ang = np.deg2rad(55)  # cos55°≈0.574，落在 [0.5, 0.6)
         g2 = np.zeros(8); g2[0] = np.cos(ang); g2[1] = np.sin(ang)
-        assert match_or_create(db, "s3", g2, 0.6, 10_000.0, 6_000.0) == gp
+        rg = match_or_create(db, "s3", g2, 0.6, 10_000.0, 6_000.0)
+        assert rg.pid == gp and rg.action == "attach" and 0.5 <= rg.best_sim < 0.6
         after = db.get(Person, gp)
         assert after.embed_count == 1
         assert after.centroid == before_bytes
         # 会话内仍只有一个人
         assert len(db.scalars(select(Person).where(Person.session_id == "s3")).all()) == 1
     eng.dispose()
+
+
+def test_task_done_speakers_metadata(client):
+    """结果契约：done 响应与 results 重拉都带认人元数据，SaaS 侧据此
+    区分确认归并（merge）与灰区挂靠（attach）。"""
+    sid = register(client)
+    tid = upload(client, sid)
+    wait_done(client, tid)
+    body = client.get(f"/v1/tasks/{tid}", headers=auth()).json()
+    # fake engine：16s 双说话人各 8s 过建卡线，首段全新建卡
+    assert len(body["speakers"]) == 2
+    assert all(s["action"] == "new" and s["best_sim"] is not None
+               and s["reattributed"] is False for s in body["speakers"])
+    # 第二段同嗓音 → 确认归并，相似度 1.0（假引擎向量逐字节相同）
+    tid2 = upload(client, sid)
+    wait_done(client, tid2)
+    body2 = client.get(f"/v1/tasks/{tid2}", headers=auth()).json()
+    assert all(s["action"] == "merge" and s["best_sim"] >= 0.6
+               for s in body2["speakers"])
+    assert {s["person_id"] for s in body2["speakers"]} == \
+        {s["person_id"] for s in body["speakers"]}
+    # 历史任务重拉不变；会话级 results 聚合两人,第二段的确认归并(merge)
+    # 压过首段的建卡(new)
+    r = client.get(f"/v1/sessions/{sid}/results", headers=auth()).json()
+    assert len(r["speakers"]) == 2
+    assert all(s["action"] == "merge" for s in r["speakers"])
+    assert {s["person_id"] for s in r["speakers"]} == \
+        {u["person_id"] for u in r["utterances"]}
+    # 合并两说话人后，会话级聚人按根人归拢成一条
+    p1 = r["speakers"][0]["person_id"]
+    p2 = r["speakers"][1]["person_id"]
+    client.post(f"/v1/sessions/{sid}/speakers/merge",
+                json={"from_person": p1, "into_person": p2}, headers=auth())
+    r2 = client.get(f"/v1/sessions/{sid}/results", headers=auth()).json()
+    assert [s["person_id"] for s in r2["speakers"]] == [p2]
 
 
 def test_results_filter_by_person(client):

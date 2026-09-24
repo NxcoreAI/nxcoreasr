@@ -5,6 +5,7 @@ resolve 到根，显示名取根的 display_name（无则 auto_label）。
 """
 import re
 import secrets
+from typing import NamedTuple
 
 import numpy as np
 from sqlalchemy import func, select
@@ -12,6 +13,15 @@ from sqlalchemy.orm import Session
 
 from .db import LabelAudit, Person, SessionRecord, Task, Utterance, now_iso
 from .engine.base import normalize
+
+
+class MatchResult(NamedTuple):
+    """认人结果：pid 之外带判定元数据，落 task_clusters 供结果契约透出
+    （SaaS 侧据此区分确认归并与灰区挂靠，不给 attach 源的轨做自动继承）。"""
+    pid: str
+    action: str          # merge|attach|new
+    best_sim: float
+    second_sim: float
 
 
 def _new_person_id() -> str:
@@ -105,12 +115,14 @@ def match_decision(centroids: list[tuple[np.ndarray, int]], emb: np.ndarray,
 
 
 def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: float,
-                    ms: float, min_enroll_ms: float) -> str:
+                    ms: float, min_enroll_ms: float,
+                    merge_seq: int | None = None) -> MatchResult:
     """与会话内各根人的质心比余弦；达标归入并滑动更新质心。
 
     判定走 match_decision；merge 归入并整权更新质心；attach 只挂最像的
     已有根人（不新建），默认不动质心（实验性低权重学习见 ATTACH_LEARN_
-    ENABLED）；new 才是真正的新说话人。
+    ENABLED）；new 才是真正的新说话人。merge_seq 是当前任务 seq，建卡/
+    合并时刷进 last_merge_seq——库收敛的休眠判定只认这种身份确认事件。
 
     centroid 存的是各成员向量的真实均值（未归一化），比较时归一，
     这样滑动更新 (均值*n + 新向量)/(n+1) 才是精确的。"""
@@ -127,7 +139,9 @@ def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: fl
                     + normalize(emb)) / (n + 1)
         best.centroid = np.asarray(centroid, dtype=np.float32).tobytes()
         best.embed_count = n + 1
-        return best.id
+        if merge_seq is not None:
+            best.last_merge_seq = merge_seq
+        return MatchResult(best.id, action, best_sim, second_sim)
     if action == "attach":
         if ATTACH_LEARN_ENABLED and best_sim - second_sim >= ATTACH_LEARN_MARGIN:
             # 实验性（默认关）：无歧义挂靠低权重学习。远场灰区碎片靠它收敛，
@@ -137,13 +151,13 @@ def match_or_create(db: Session, session_id: str, emb: np.ndarray, threshold: fl
             centroid = (np.frombuffer(best.centroid, dtype=np.float32) * n
                         + ATTACH_LEARN * normalize(emb)) / (n + ATTACH_LEARN)
             best.centroid = np.asarray(centroid, dtype=np.float32).tobytes()
-        return best.id
+        return MatchResult(best.id, action, best_sim, second_sim)
     root_count = len(roots)
     pid = _new_person_id()
     db.add(Person(id=pid, session_id=session_id, auto_label=f"说话人{root_count + 1}",
                   centroid=np.asarray(normalize(emb), dtype=np.float32).tobytes(),
-                  embed_count=1))
-    return pid
+                  embed_count=1, last_merge_seq=merge_seq))
+    return MatchResult(pid, action, best_sim, second_sim)
 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")

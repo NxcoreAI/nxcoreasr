@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import (
+    Integer,
     LargeBinary,
     String,
     Text,
@@ -81,6 +82,10 @@ class Person(Base):
     merged_into: Mapped[str | None] = mapped_column(String(64))
     centroid: Mapped[bytes | None] = mapped_column(LargeBinary)
     embed_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    # 最近一次"身份确认"（建卡或整权合并）所在任务 seq：库收敛的休眠判定只认
+    # 这个——挂靠不增加向量数却会归 utterance，靠它判活跃会让只被挂靠喂数的
+    # 僵尸卡永远"清醒"（真实会议实测 1 向量卡被挂靠喂了 34 片没被回收）
+    last_merge_seq: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (Index("idx_persons_session", "session_id"),)
 
 
@@ -110,7 +115,32 @@ class LabelAudit(Base):
     at: Mapped[str] = mapped_column(String(40), nullable=False)
 
 
-_RLS_TABLES = ["sessions", "tasks", "persons", "utterances", "label_audit"]
+class TaskCluster(Base):
+    """任务内说话人簇的音色向量与归属：录音潮结束后的重归属（reattribute）
+    用最终声纹库对历史"挂靠"簇重新裁决——少言者建卡晚，其早前被灰区
+    吸走的话在新卡出现后可改判回来。seqs 是该簇覆盖的 utterance seq 列表。
+
+    action/best_sim/second_sim 是认人判定元数据（merge|attach|new），随结果
+    契约透出给 SaaS 区分确认归并与灰区挂靠；存量行 NULL=无记录。reattribute
+    改判时回填并置 reattributed。"""
+    __tablename__ = "task_clusters"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    person_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    ms: Mapped[int] = mapped_column(nullable=False)
+    emb: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    seqs: Mapped[list] = mapped_column(JSONB, nullable=False)
+    action: Mapped[str | None] = mapped_column(String(16))
+    best_sim: Mapped[float | None]
+    second_sim: Mapped[float | None]
+    reattributed: Mapped[bool | None]
+    __table_args__ = (Index("idx_task_clusters_session", "session_id"),)
+
+
+_RLS_TABLES = ["sessions", "tasks", "persons", "utterances", "label_audit",
+               "task_clusters"]
 
 
 @event.listens_for(Session, "before_flush")
@@ -138,6 +168,9 @@ def build_engine(cfg: AppConfig):
 def init_db(engine) -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
+        # 存量库补列（create_all 不做 ALTER）；IF NOT EXISTS 幂等
+        conn.execute(text(
+            "ALTER TABLE persons ADD COLUMN IF NOT EXISTS last_merge_seq INTEGER"))
         for table in _RLS_TABLES:
             conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
             conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
@@ -152,6 +185,11 @@ def init_db(engine) -> None:
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_tasks_upload_token ON tasks(upload_token)"))
         conn.execute(text("ALTER TABLE tasks ALTER COLUMN seq DROP NOT NULL"))
         conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS hotwords jsonb"))
+        # 认人元数据列（结果契约透出）；存量行 NULL=无记录
+        conn.execute(text("ALTER TABLE task_clusters ADD COLUMN IF NOT EXISTS action varchar(16)"))
+        conn.execute(text("ALTER TABLE task_clusters ADD COLUMN IF NOT EXISTS best_sim FLOAT"))
+        conn.execute(text("ALTER TABLE task_clusters ADD COLUMN IF NOT EXISTS second_sim FLOAT"))
+        conn.execute(text("ALTER TABLE task_clusters ADD COLUMN IF NOT EXISTS reattributed BOOLEAN"))
 
 
 @contextmanager
