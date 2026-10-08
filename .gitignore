@@ -10,3 +10,4 @@ config.yaml
 
 # 说话人分离 data case：真实人声音频与转写文本（隐私），仅本地维护
 diarize_cases/
+pg-dist
