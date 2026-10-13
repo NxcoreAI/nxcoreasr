@@ -11,13 +11,24 @@ os.environ["ASR_FAKE_ENGINE"] = "1"
 KEY_A = "test-key-a"
 KEY_B = "test-key-b"
 
-TEST_DB_URL = "postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:25432/asr_test"
+TEST_DB_URL = os.environ.get("ASR_TEST_DB_URL") or "postgresql+psycopg://asr_app:asr_dev_password@127.0.0.1:25432/asr_test"
 ADMIN_URL = "postgresql+psycopg://asr_admin:asr_admin_dev_only@127.0.0.1:25432/postgres"
+
+# RLS 行级隔离（跨租户不可见）为 PG 专属属性；SQLite 桌面分支单租户单库
+# 文件，本就无跨租户可见面——相关隔离断言跳过。
+sqlite_skip = pytest.mark.skipif(
+    TEST_DB_URL.startswith("sqlite"),
+    reason="RLS tenant isolation is PostgreSQL-only",
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
 def test_database():
-    """session 级：以超管建测试库（owner 为 asr_app），复用则跳过建库。"""
+    """session 级：以超管建测试库（owner 为 asr_app），复用则跳过建库。
+    ASR_TEST_DB_URL 指向 sqlite:// 时跳过（桌面方言分支的无 PG 测试跑法）。"""
+    if TEST_DB_URL.startswith("sqlite"):
+        yield
+        return
     from sqlalchemy import create_engine, text
     from sqlalchemy.pool import NullPool
 
@@ -35,12 +46,16 @@ def test_database():
 
 @pytest.fixture()
 def client(tmp_path):
-    # 每个测试重置 schema（等价于原来每测试一个新 SQLite 文件）
+    # 每个测试重置 schema（等价于原来每测试一个新 SQLite 文件）；
+    # sqlite 跑法下每个测试直接换新库文件。
     from sqlalchemy import create_engine
 
     from app.db import Base, init_db
 
-    eng = create_engine(TEST_DB_URL)
+    db_url = TEST_DB_URL
+    if db_url.startswith("sqlite"):
+        db_url = f"sqlite:///{tmp_path / 'asr_test.db'}"
+    eng = create_engine(db_url)
     Base.metadata.drop_all(eng)
     init_db(eng)
     eng.dispose()
@@ -51,7 +66,7 @@ data_dir: {tmp_path / 'data'}
 max_workers: 2
 speaker_threshold: 0.6
 max_upload_mb: 5
-database_url: {TEST_DB_URL}
+database_url: {db_url}
 tenants:
   - name: saas_a
     api_key: {KEY_A}

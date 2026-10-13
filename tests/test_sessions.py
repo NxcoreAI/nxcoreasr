@@ -1,4 +1,4 @@
-from tests.conftest import auth, register, upload, KEY_A, KEY_B
+from tests.conftest import auth, register, upload, KEY_A, KEY_B, sqlite_skip
 
 
 def test_register_idempotent(client):
@@ -9,6 +9,7 @@ def test_register_idempotent(client):
     assert r.json()["created"] is False
 
 
+@sqlite_skip
 def test_cross_tenant_isolation(client):
     sid = register(client, "call-1", KEY_A)
     # B 租户看不见 A 的会话，且同名 external_id 互不冲突
@@ -35,6 +36,7 @@ def test_health_requires_key(client):
     assert body["done"] == 0 and body["failed"] == 0
 
 
+@sqlite_skip
 def test_health_only_own_tenant(client):
     """A 的数字不应出现在 B 的 health 里（反之亦然，只统计本租户）。"""
     sid = register(client, "call-1")

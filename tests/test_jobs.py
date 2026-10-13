@@ -8,6 +8,7 @@ from tests.conftest import (
     create_job,
     make_wav,
     register,
+    sqlite_skip,
     upload,
     wait_done,
 )
@@ -66,6 +67,7 @@ def test_complete_idempotent_after_done(client):
     assert r.json()["queued"] is False and r.json()["status"] == "done"
 
 
+@sqlite_skip
 def test_token_invisible_to_other_tenant(client):
     job = create_job(client, "iso-1", key=KEY_A)["job_id"]
     a = _authorize(client, job, key=KEY_A)
@@ -125,6 +127,7 @@ def test_job_requires_key(client):
     assert client.post(f"/v1/asr-jobs/{job}/upload-complete").status_code == 401
 
 
+@sqlite_skip
 def test_list_tasks(client):
     sid = register(client, "list-1")
     done = upload(client, sid)
